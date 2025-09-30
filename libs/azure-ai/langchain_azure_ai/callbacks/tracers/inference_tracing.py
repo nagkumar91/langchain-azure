@@ -234,31 +234,51 @@ def _normalize(v: Any) -> Any:  # returns json-safe primitive or None
 
 
 def _redact(messages_json: str) -> str:
+    """Redact content while preserving original item structure where possible.
+
+    - For thread-style lists (list of lists), output a list of lists of
+      dicts preserving each item's "type" (defaulting to "text") and
+      replacing content with "[REDACTED]".
+    - For flat lists (e.g., system instructions or outputs), output a list of
+      dicts with {"type": <orig or "text">, "content": "[REDACTED]"}.
+    - Falls back gracefully on errors.
+    """
     try:
         parsed = json.loads(messages_json)
         if isinstance(parsed, list):
+            # Nested threads: [[{...}, ...], ...]
             if parsed and isinstance(parsed[0], list):
-                red: Any = []
+                red_threads: List[List[Dict[str, Any]]] = []
                 for thread in parsed:
                     if isinstance(thread, list):
-                        red.append(
-                            [
-                                {"role": m.get("role", "?"), "content": "[REDACTED]"}
-                                for m in thread
-                                if isinstance(m, dict)
-                            ]
-                        )
+                        red_thread: List[Dict[str, Any]] = []
+                        for item in thread:
+                            if isinstance(item, dict):
+                                red_thread.append(
+                                    {
+                                        "type": item.get("type", "text"),
+                                        "content": "[REDACTED]",
+                                    }
+                                )
+                            elif isinstance(item, str):
+                                red_thread.append({"type": "text", "content": "[REDACTED]"})
+                        red_threads.append(red_thread)
                     else:
-                        red.append(thread)
-            else:
-                red = [
-                    {"role": m.get("role", "?"), "content": "[REDACTED]"}
-                    for m in parsed
-                    if isinstance(m, dict)
-                ]
-            return _safe_json(red)
+                        # Preserve unknown shapes
+                        red_threads.append([{"type": "text", "content": "[REDACTED]"}])
+                return _safe_json(red_threads)
+            # Flat list of items: system instructions, outputs, etc.
+            red_items: List[Dict[str, Any]] = []
+            for item in parsed:
+                if isinstance(item, dict):
+                    red_items.append(
+                        {"type": item.get("type", "text"), "content": "[REDACTED]"}
+                    )
+                elif isinstance(item, str):
+                    red_items.append({"type": "text", "content": "[REDACTED]"})
+            return _safe_json(red_items)
     except Exception:
-        return '[{"role":"?","content":"[REDACTED]"}]'
+        return '[{"type":"text","content":"[REDACTED]"}]'
     return messages_json
 
 
@@ -489,7 +509,29 @@ class _Core:
             tools_def = (serialized.get("kwargs", {}) or {}).get("tools")
             if tools_def:
                 a[Attrs.TOOL_DEFINITIONS] = _safe_json(tools_def)
-        input_msgs = self.redact_messages(messages_json)
+        # Normalize input messages into role/parts threads, then redact (if enabled)
+        try:
+            parsed = json.loads(messages_json)
+        except Exception:
+            parsed = []
+        # parsed is a List[List[BaseMessage-like dicts]]; coerce to role/parts
+        role_parts_threads = []
+        for thread in parsed or []:
+            if isinstance(thread, list):
+                rp_thread = []
+                for m in thread or []:
+                    if isinstance(m, dict):
+                        role = m.get("type")
+                        content = m.get("content")
+                        parts = []
+                        if isinstance(content, str) and content:
+                            parts.append({"type": "text", "content": content})
+                        rp_thread.append(
+                            {"role": "assistant" if role == "ai" else ("tool" if role == "tool" else "user"),
+                             "parts": parts or [{"type": "text", "content": ""}]}
+                        )
+                role_parts_threads.append(rp_thread)
+        input_msgs = self.redact_messages(_safe_json(role_parts_threads)) if role_parts_threads else None
         if input_msgs is not None:
             a[Attrs.INPUT_MESSAGES] = input_msgs
         agent_name = None
@@ -511,15 +553,12 @@ class _Core:
     def llm_end_attrs(self, result: LLMResult) -> Dict[str, Any]:
         gens: List[List[ChatGeneration]] = getattr(result, "generations", [])
         finish = _finish_reasons(gens)
-        outputs: List[Dict[str, Any]] = []
-        for group in gens:
-            for gen in group:
-                content = getattr(gen, "text", None)
-                if content is None and hasattr(gen, "message"):
-                    content = getattr(gen.message, "content", None)
-                outputs.append({"content": content})
+        # Convert generations to role/parts messages and redact if enabled
+        role_parts = _generations_to_role_parts(gens)
         out: Dict[str, Any] = {Attrs.RESPONSE_FINISH_REASONS: finish or None}
-        output_json = self.redact_messages(_safe_json(outputs)) if outputs else None
+        output_json = (
+            self.redact_messages(_safe_json(role_parts)) if role_parts else None
+        )
         if output_json is not None:
             out[Attrs.OUTPUT_MESSAGES] = output_json
             if self.include_legacy:
