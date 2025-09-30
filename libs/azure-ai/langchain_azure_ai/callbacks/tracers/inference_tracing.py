@@ -1653,3 +1653,63 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
 __all__ = ["AzureAIOpenTelemetryTracer"]
 
 # End of file
+def _generations_to_role_parts(
+    gens: List[List[ChatGeneration]],
+) -> List[Dict[str, Any]]:
+    messages: List[Dict[str, Any]] = []
+    for group in gens or []:
+        for gen in group or []:
+            parts: List[Dict[str, Any]] = []
+            # Text content
+            content = getattr(gen, "text", None)
+            if content is None and hasattr(gen, "message"):
+                content = getattr(gen.message, "content", None)
+            if isinstance(content, str) and content:
+                parts.append({"type": "text", "content": content})
+            # Tool calls (if present on message)
+            msg = getattr(gen, "message", None)
+            tool_calls = getattr(msg, "tool_calls", None)
+            if tool_calls:
+                for tc in tool_calls:
+                    if isinstance(tc, dict):
+                        tc_id = tc.get("id")
+                        func = tc.get("function") or {}
+                        name = func.get("name") or tc.get("name")
+                        args = func.get("arguments") if isinstance(func, dict) else None
+                        parts.append(
+                            {
+                                "type": "tool_call",
+                                "id": tc_id,
+                                "name": name,
+                                "arguments": _try_parse_json(args if args is not None else tc.get("arguments")),
+                            }
+                        )
+                    else:
+                        tc_id = getattr(tc, "id", None)
+                        name = getattr(tc, "name", None)
+                        args = getattr(tc, "args", None) or getattr(tc, "arguments", None)
+                        parts.append(
+                            {
+                                "type": "tool_call",
+                                "id": str(tc_id) if tc_id is not None else None,
+                                "name": name,
+                                "arguments": _try_parse_json(args),
+                            }
+                        )
+            # Finish reason from generation_info if available
+            info = getattr(gen, "generation_info", None) or {}
+            finish_reason = None
+            if isinstance(info, dict):
+                finish_reason = (
+                    info.get("finish_reason")
+                    or info.get("finishReason")
+                    or info.get("reason")
+                )
+            messages.append(
+                {
+                    "role": "assistant",
+                    "parts": parts or [{"type": "text", "content": ""}],
+                    "finish_reason": finish_reason,
+                }
+            )
+    return messages
