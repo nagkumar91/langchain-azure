@@ -6,8 +6,6 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
-from azure.ai.vision.imageanalysis import ImageAnalysisClient
-from azure.ai.vision.imageanalysis.models import VisualFeatures
 from azure.core.exceptions import HttpResponseError
 from langchain_core.callbacks import CallbackManagerForToolRun
 from langchain_core.tools import BaseTool
@@ -16,6 +14,17 @@ from pydantic import PrivateAttr, model_validator
 
 from langchain_azure_ai._resources import AIServicesService
 from langchain_azure_ai.utils.utils import detect_file_src_type
+
+try:
+    from azure.ai.vision.imageanalysis import ImageAnalysisClient
+    from azure.ai.vision.imageanalysis.models import VisualFeatures
+except ImportError:
+    raise ImportError(
+        "To use Azure AI Image Analysis tool, please install the"
+        "'azure-ai-vision-imageanalysis' package: "
+        "`pip install azure-ai-vision-imageanalysis` or install the 'tools' "
+        "extra: `pip install langchain-azure-ai[tools]`"
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -152,13 +161,11 @@ class AzureAIImageAnalysisTool(BaseTool, AIServicesService):
         run_manager: Optional[CallbackManagerForToolRun] = None,
     ) -> str:
         """Use the tool."""
-        # try:
-        print(f"Running {self.name} with query: {query}")
+        try:
+            image_analysis_result = self._image_analysis(query)
+            if not image_analysis_result:
+                return "No good image analysis result was found"
 
-        image_analysis_result = self._image_analysis(query)
-        if not image_analysis_result:
-            return "No good image analysis result was found"
-
-        return self._format_image_analysis_result(image_analysis_result)
-        # except Exception as e:
-        #    raise RuntimeError(f"Error while running {self.name}: {e}")
+            return self._format_image_analysis_result(image_analysis_result)
+        except Exception as e:
+            raise RuntimeError(f"Error while running {self.name}: {e}")
