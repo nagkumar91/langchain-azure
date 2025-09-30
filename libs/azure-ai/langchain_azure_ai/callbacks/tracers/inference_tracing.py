@@ -260,8 +260,8 @@ def _redact(messages_json: str) -> str:
                                         "content": "[REDACTED]",
                                     }
                                 )
-                            elif isinstance(item, str):
-                                red_thread.append({"type": "text", "content": "[REDACTED]"})
+                elif isinstance(item, str):
+                    red_thread.append({"type": "text", "content": "[REDACTED]"})
                         red_threads.append(red_thread)
                     else:
                         # Preserve unknown shapes
@@ -1705,6 +1705,8 @@ def _generations_to_role_parts(
                     or info.get("finishReason")
                     or info.get("reason")
                 )
+            if finish_reason is None:
+                finish_reason = "stop"
             messages.append(
                 {
                     "role": "assistant",
