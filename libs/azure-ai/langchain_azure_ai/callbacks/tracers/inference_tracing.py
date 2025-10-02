@@ -17,7 +17,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID, uuid4
 
 from langchain_core.callbacks import BaseCallbackHandler
@@ -767,6 +767,9 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         self._pending_tool_calls: Dict[str, Dict[str, Any]] = {}
         # Track which agents we've already emitted a create_agent span for
         self._created_agents: set[str] = set()
+        # Track active invoke_agent spans to avoid duplicates per (parent, agent)
+        self._active_agent_keys: set[Tuple[Optional[UUID], Optional[str]]] = set()
+        self._agent_run_to_key: Dict[UUID, Tuple[Optional[UUID], Optional[str]]] = {}
 
     def on_chat_model_start(
         self,
@@ -833,6 +836,10 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             model=model,
             params=params,
         )
+        # If there is no explicit parent, but we have a fallback agent span started
+        # for this step, parent chat under that invoke_agent
+        if parent_run_id is None and run_id in self._agent_run_to_key:
+            parent_run_id = run_id
         self._core.start(
             run_id=run_id,
             name=f"chat {model}" if model else "chat",
@@ -1034,6 +1041,14 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             red = self._core.redact_messages(_safe_json(sys_inst))
             if red is not None:
                 attrs[Attrs.SYSTEM_INSTRUCTIONS] = red
+        # De-duplicate invoke_agent per (parent_run_id, agent_name)
+        agent_name = attrs.get(Attrs.AGENT_NAME)
+        key: Tuple[Optional[UUID], Optional[str]] = (parent_run_id, agent_name)
+        if key in self._active_agent_keys:
+            # Skip starting a duplicate agent span for the same step/parent
+            return
+        self._active_agent_keys.add(key)
+        self._agent_run_to_key[run_id] = key
         self._core.start(
             run_id=run_id,
             name=f"invoke_agent {name}" if name else "invoke_agent",
@@ -1079,6 +1094,13 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         if self._core.include_legacy and attrs.get(Attrs.OUTPUT_MESSAGES):
             attrs[Attrs.LEGACY_COMPLETION] = attrs[Attrs.OUTPUT_MESSAGES]
         self._core.set(run_id, attrs)
+        # Clear active key for this agent run
+        try:
+            key = self._agent_run_to_key.pop(run_id, None)
+            if key and key in self._active_agent_keys:
+                self._active_agent_keys.discard(key)
+        except Exception:
+            pass
         self._core.end(run_id, None)
 
     def on_chain_start(
@@ -1092,13 +1114,12 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         metadata: Optional[Dict[str, Any]] = None,
         **__: Any,
     ) -> Any:
-        """Start a chain span (treated as invoke_agent)."""
-        _name = (
-            (serialized or {}).get("id") or (serialized or {}).get("name") or "chain"
-        )
+        """Fallback: start an invoke_agent span if the agent callback didn’t fire.
+
+        Ensures a single root span exists so downstream chat/tool spans share one trace.
+        """
         attrs = {
             Attrs.PROVIDER_NAME: self._core.provider,
-            # invoke_agent for chain start
             Attrs.OPERATION_NAME: "invoke_agent",
             Attrs.METADATA_RUN_ID: str(run_id),
             Attrs.METADATA_PARENT_RUN_ID: str(parent_run_id) if parent_run_id else None,
@@ -1120,25 +1141,43 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                     break
         if agent_name:
             attrs[Attrs.AGENT_NAME] = agent_name
-        self._core.enrich_langgraph(attrs, metadata)
+        # Normalize inputs to role/parts threads
         if "messages" in inputs and isinstance(inputs["messages"], list):
             msgs = inputs["messages"]
+            rp_threads: List[List[Dict[str, Any]]] = []
             if msgs and isinstance(msgs[0], BaseMessage):
-                msg_json = _safe_json([_msg_dict(m) for m in msgs])
+                rp_threads = [[_message_to_role_parts(m) for m in msgs]]
             else:
-                msg_json = _safe_json(msgs)
-            msg_attr = self._core.redact_messages(msg_json)
-            if msg_attr is not None:
-                attrs[Attrs.INPUT_MESSAGES] = msg_attr
+                rp_thread: List[Dict[str, Any]] = []
+                for m in msgs:
+                    if isinstance(m, dict) and "role" in m and "content" in m:
+                        parts = []
+                        c = m.get("content")
+                        if isinstance(c, str) and c:
+                            parts.append({"type": "text", "content": c})
+                        rp_thread.append({"role": m.get("role", "user"), "parts": parts or [{"type": "text", "content": ""}], "finish_reason": "stop"})
+                if rp_thread:
+                    rp_threads = [rp_thread]
+            if rp_threads:
+                msg_attr = self._core.redact_messages(_safe_json(rp_threads))
+                if msg_attr is not None:
+                    attrs[Attrs.INPUT_MESSAGES] = msg_attr
+        self._core.enrich_langgraph(attrs, metadata)
+        # De-duplicate invoke_agent per (parent_run_id, agent_name)
+        key: Tuple[Optional[UUID], Optional[str]] = (parent_run_id, agent_name)
+        if key in self._active_agent_keys:
+            return None
+        self._active_agent_keys.add(key)
+        self._agent_run_to_key[run_id] = key
         self._core.start(
             run_id=run_id,
-            # Follow spec: if agent name not available, use just "invoke_agent"
             name=(f"invoke_agent {agent_name}" if agent_name else "invoke_agent"),
-            kind=SpanKind.INTERNAL,
+            kind=SpanKind.CLIENT,
             operation="invoke_agent",
             parent_run_id=parent_run_id,
             attrs=attrs,
         )
+        return None
 
     def on_chain_end(
         self,
@@ -1151,35 +1190,45 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
     ) -> Any:
         """Finish the chain span and attach outputs when relevant."""
         attrs: Dict[str, Any] = {}
-        state = self._core._runs.get(run_id)
-        op = getattr(state, "operation", None) if state else None
-        if op in {"invoke_agent", "parse", "transform", "chat", "embeddings"}:
-            if (
-                isinstance(outputs, dict)
-                and "messages" in outputs
-                and isinstance(outputs["messages"], list)
-            ):
-                msgs: List[Dict[str, Any]] = []
-                for m in outputs["messages"]:
-                    if isinstance(m, BaseMessage):
-                        msgs.append(_message_to_role_parts(m))
-                    elif isinstance(m, dict) and "role" in m and "content" in m:
-                        parts = []
-                        c = m.get("content")
-                        if isinstance(c, str) and c:
-                            parts.append({"type": "text", "content": c})
-                        msgs.append({"role": m.get("role", "assistant"), "parts": parts or [{"type": "text", "content": ""}], "finish_reason": "stop"})
-                msg_attr = self._core.redact_messages(_safe_json(msgs)) if msgs else None
-                if msg_attr is not None:
-                    attrs[Attrs.OUTPUT_MESSAGES] = msg_attr
+        # Attach outputs normalized to OutputMessages
+        if (
+            isinstance(outputs, dict)
+            and "messages" in outputs
+            and isinstance(outputs["messages"], list)
+        ):
+            msgs: List[Dict[str, Any]] = []
+            for m in outputs["messages"]:
+                if isinstance(m, BaseMessage):
+                    msgs.append(_message_to_role_parts(m))
+                elif isinstance(m, dict) and "role" in m and "content" in m:
+                    parts = []
+                    c = m.get("content")
+                    if isinstance(c, str) and c:
+                        parts.append({"type": "text", "content": c})
+                    msgs.append({"role": m.get("role", "assistant"), "parts": parts or [{"type": "text", "content": ""}], "finish_reason": "stop"})
+            msg_attr = self._core.redact_messages(_safe_json(msgs)) if msgs else None
+            if msg_attr is not None:
+                attrs[Attrs.OUTPUT_MESSAGES] = msg_attr
             elif (
                 hasattr(outputs, "__class__")
                 and outputs.__class__.__name__ == "Command"
             ):
                 pass
-
-            if attrs:
+        # Fallback end: if we started an invoke_agent at chain_start, attach outputs
+        # and end it so we have a single trace and root for the step.
+        if attrs:
+            try:
                 self._core.set(run_id, attrs)
+            except Exception:
+                pass
+        try:
+            key = self._agent_run_to_key.pop(run_id, None)
+            if key and key in self._active_agent_keys:
+                self._active_agent_keys.discard(key)
+            # End the agent span only if it exists
+            self._core.end(run_id, None)
+        except Exception:
+            pass
 
         try:
             pending_for_chain = [
@@ -1204,14 +1253,15 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                     name=f"execute_tool {name}",
                     kind=SpanKind.INTERNAL,
                     operation="execute_tool",
-                    parent_run_id=run_id,
+                    # Parent synthetic tool under the chat span that proposed it
+                    parent_run_id=meta.get("llm_run_id") or run_id,
                     attrs=t_attrs,
                 )
                 self._core.end(run_tool_id, None)
                 self._pending_tool_calls.pop(tc_id, None)
         except Exception:
             pass
-        self._core.end(run_id, None)
+        # No chain span to end; ensure pending synthetic entries are cleared above.
 
     def on_chain_error(
         self,
