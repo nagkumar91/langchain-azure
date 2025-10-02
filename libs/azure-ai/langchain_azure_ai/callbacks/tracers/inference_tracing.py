@@ -987,6 +987,9 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             or getattr(action, "log", None)
             or getattr(action, "agent_name", None)
         )
+        # Avoid starting duplicate agent spans if one is already active
+        if self._has_active_invoke_agent():
+            return
         # Emit create_agent once per agent name (best-effort detection)
         try:
             if isinstance(name, str) and name and name not in self._created_agents:
@@ -1041,6 +1044,10 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             red = self._core.redact_messages(_safe_json(sys_inst))
             if red is not None:
                 attrs[Attrs.SYSTEM_INSTRUCTIONS] = red
+        # Avoid noisy agent spans for tool-only actions
+        if isinstance(getattr(action, "tool", None), str):
+            # Tool actions are recorded as execute_tool spans elsewhere
+            return
         # De-duplicate invoke_agent per (parent_run_id, agent_name)
         agent_name = attrs.get(Attrs.AGENT_NAME)
         key: Tuple[Optional[UUID], Optional[str]] = (parent_run_id, agent_name)
@@ -1230,35 +1237,12 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         except Exception:
             pass
 
+        # Move synthetic tool spans to chat parent: handled in on_llm_start/on_llm_end
+        # Ensure no pending synthetic entries remain for this chain
         try:
-            pending_for_chain = [
-                (tc_id, meta)
-                for tc_id, meta in list(self._pending_tool_calls.items())
-                if meta.get("chain_parent_run_id") == run_id
-            ]
-            for tc_id, meta in pending_for_chain:
-                name = meta.get("name") or "tool"
-                run_tool_id = uuid4()
-                t_attrs = {
-                    Attrs.PROVIDER_NAME: self._core.provider,
-                    Attrs.OPERATION_NAME: "execute_tool",
-                    Attrs.TOOL_NAME: name,
-                    Attrs.TOOL_CALL_ID: tc_id,
-                    Attrs.AZURE_RESOURCE_NAMESPACE: "Microsoft.CognitiveServices",
-                }
-                if self._core.enable_content_recording and ("args" in meta):
-                    t_attrs[Attrs.TOOL_CALL_ARGS] = _safe_json(meta.get("args"))
-                self._core.start(
-                    run_id=run_tool_id,
-                    name=f"execute_tool {name}",
-                    kind=SpanKind.INTERNAL,
-                    operation="execute_tool",
-                    # Parent synthetic tool under the chat span that proposed it
-                    parent_run_id=meta.get("llm_run_id") or run_id,
-                    attrs=t_attrs,
-                )
-                self._core.end(run_tool_id, None)
-                self._pending_tool_calls.pop(tc_id, None)
+            for tc_id, meta in list(self._pending_tool_calls.items()):
+                if meta.get("chain_parent_run_id") == run_id:
+                    self._pending_tool_calls.pop(tc_id, None)
         except Exception:
             pass
         # No chain span to end; ensure pending synthetic entries are cleared above.
@@ -1886,6 +1870,15 @@ def _generations_to_role_parts(
                     or info.get("finishReason")
                     or info.get("reason")
                 )
+            # Normalize provider variants
+            if finish_reason == "tool_calls":
+                finish_reason = "tool_call"
+    def _has_active_invoke_agent(self) -> bool:
+        try:
+            return any(getattr(r, "operation", None) == "invoke_agent" for r in self._core._runs.values())
+        except Exception:
+            return False
+
             if finish_reason is None:
                 finish_reason = "stop"
             messages.append(
