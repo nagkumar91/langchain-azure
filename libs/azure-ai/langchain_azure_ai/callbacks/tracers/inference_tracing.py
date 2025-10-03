@@ -885,10 +885,12 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             model=model,
             params=params,
         )
-        # If there is no explicit parent, but we have a fallback agent span started
-        # for this step, parent chat under that invoke_agent
-        if parent_run_id is None and run_id in self._agent_run_to_key:
-            parent_run_id = run_id
+        # If provided parent is missing or unknown, parent chat under the root invoke_agent
+        try:
+            if (parent_run_id is None or parent_run_id not in self._core._runs) and hasattr(self, "_root_agent_run_id") and self._root_agent_run_id:
+                parent_run_id = self._root_agent_run_id
+        except Exception:
+            pass
         self._core.start(
             run_id=run_id,
             name=f"chat {model}" if model else "chat",
@@ -931,6 +933,12 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             model=model,
             params=params,
         )
+        # If provided parent is missing or unknown, parent chat under the root invoke_agent
+        try:
+            if (parent_run_id is None or parent_run_id not in self._core._runs) and hasattr(self, "_root_agent_run_id") and self._root_agent_run_id:
+                parent_run_id = self._root_agent_run_id
+        except Exception:
+            pass
         self._core.start(
             run_id=run_id,
             name=f"chat {model}" if model else "chat",
@@ -1265,9 +1273,10 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         # Only start a root agent span when there's no parent
         if parent_run_id is not None:
             return None
-        # Start top-level invoke_agent
+        # Start top-level invoke_agent and track as root
         self._active_agent_keys.add((None, agent_name))
         self._agent_run_to_key[run_id] = (None, agent_name)
+        self._root_agent_run_id = run_id
         self._core.start(
             run_id=run_id,
             name=(f"invoke_agent {agent_name}" if agent_name else "invoke_agent"),
