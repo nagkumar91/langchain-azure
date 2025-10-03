@@ -885,6 +885,12 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             model=model,
             params=params,
         )
+        # Attach conversation id when available
+        try:
+            if hasattr(self, "_root_agent_run_id") and self._root_agent_run_id:
+                attrs[Attrs.CONVERSATION_ID] = str(self._root_agent_run_id)
+        except Exception:
+            pass
         # If provided parent is missing or unknown, parent chat under the root invoke_agent
         try:
             if (parent_run_id is None or parent_run_id not in self._core._runs) and hasattr(self, "_root_agent_run_id") and self._root_agent_run_id:
@@ -933,6 +939,12 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             model=model,
             params=params,
         )
+        # Attach conversation id when available
+        try:
+            if hasattr(self, "_root_agent_run_id") and self._root_agent_run_id:
+                attrs[Attrs.CONVERSATION_ID] = str(self._root_agent_run_id)
+        except Exception:
+            pass
         # If provided parent is missing or unknown, parent chat under the root invoke_agent
         try:
             if (parent_run_id is None or parent_run_id not in self._core._runs) and hasattr(self, "_root_agent_run_id") and self._root_agent_run_id:
@@ -1414,7 +1426,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         **__: Any,
     ) -> Any:
         """Start a tool execution span and record arguments (opt-in)."""
-        name = (serialized or {}).get("name") or "tool"
+        name = (serialized or {}).get("name") or (inputs or {}).get("name") or "tool"
         args_val = inputs if inputs is not None else {"input_str": input_str}
         tool_call_id = None
         if inputs and isinstance(inputs, dict):
@@ -1442,6 +1454,12 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             Attrs.TOOL_CALL_ID: tool_call_id,
             Attrs.AZURE_RESOURCE_NAMESPACE: "Microsoft.CognitiveServices",
         }
+        # Attach conversation id when available
+        try:
+            if hasattr(self, "_root_agent_run_id") and self._root_agent_run_id:
+                attrs[Attrs.CONVERSATION_ID] = str(self._root_agent_run_id)
+        except Exception:
+            pass
         # Debug: print callback and parent
         if self._core._debug:
             try:
