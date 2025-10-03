@@ -222,7 +222,9 @@ def _finish_reasons(gens: List[List[ChatGeneration]]) -> List[str]:
         if r not in seen:
             dedup.append(r)
             seen.add(r)
-    return dedup
+    # Normalize provider variants to schema
+    norm = ["tool_call" if r == "tool_calls" else r for r in dedup]
+    return norm
 
 
 def _normalize(v: Any) -> Any:  # returns json-safe primitive or None
@@ -848,6 +850,14 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             parent_run_id=parent_run_id,
             attrs=attrs,
         )
+        # Track last chat span for this agent parent to re-parent tool spans
+        try:
+            if parent_run_id is not None:
+                if not hasattr(self, "_last_chat_for_parent"):
+                    self._last_chat_for_parent: Dict[UUID, UUID] = {}
+                self._last_chat_for_parent[parent_run_id] = run_id
+        except Exception:
+            pass
 
     def on_llm_start(
         self,
@@ -882,6 +892,36 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             parent_run_id=parent_run_id,
             attrs=attrs,
         )
+        # Emit synthetic tool spans after starting chat so they parent under chat
+        try:
+            for thread in messages or []:
+                for m in thread or []:
+                    if isinstance(m, ToolMessage):
+                        tc_id = getattr(m, "tool_call_id", None)
+                        name = getattr(m, "name", None)
+                        if tc_id and tc_id in self._pending_tool_calls:
+                            meta = self._pending_tool_calls.pop(tc_id, {})
+                            run_tool_id = uuid4()
+                            t_attrs = {
+                                Attrs.PROVIDER_NAME: self._core.provider,
+                                Attrs.OPERATION_NAME: "execute_tool",
+                                Attrs.TOOL_NAME: name or meta.get("name"),
+                                Attrs.TOOL_CALL_ID: tc_id,
+                                Attrs.AZURE_RESOURCE_NAMESPACE: "Microsoft.CognitiveServices",
+                            }
+                            if self._core.enable_content_recording and ("args" in meta):
+                                t_attrs[Attrs.TOOL_CALL_ARGS] = _safe_json(meta["args"]) 
+                            self._core.start(
+                                run_id=run_tool_id,
+                                name=f"execute_tool {t_attrs.get(Attrs.TOOL_NAME) or ''}".strip(),
+                                kind=SpanKind.INTERNAL,
+                                operation="execute_tool",
+                                parent_run_id=run_id,
+                                attrs=t_attrs,
+                            )
+                            self._core.end(run_tool_id, None)
+        except Exception:
+            pass
 
     def on_llm_end(
         self,
@@ -987,8 +1027,33 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             or getattr(action, "log", None)
             or getattr(action, "agent_name", None)
         )
-        # Avoid starting duplicate agent spans if one is already active
+        # Avoid starting duplicate agent spans if one is already active for this parent
+        agent_name_hint = (
+            getattr(action, "agent_name", None)
+            or getattr(action, "name", None)
+            or getattr(action, "tool", None)
+        )
+        key_check: Tuple[Optional[UUID], Optional[str]] = (parent_run_id, str(agent_name_hint) if agent_name_hint else None)
+        # Suppress generic or tool-only agent wrappers and duplicates
+        # 1) If an invoke_agent is already active anywhere, skip
         if self._has_active_invoke_agent():
+            return
+        # 2) If an invoke_agent for this parent was already started, skip
+        if key_check in self._active_agent_keys:
+            return
+        # 3) If parent span is itself an invoke_agent, do not start nested invoke_agent
+        try:
+            if parent_run_id and parent_run_id in self._core._runs:
+                par = self._core._runs[parent_run_id]
+                if getattr(par, "operation", None) == "invoke_agent":
+                    return
+        except Exception:
+            pass
+        # 4) Suppress generic names and tool-only wrappers
+        if isinstance(agent_name_hint, str):
+            _nm = agent_name_hint.strip().lower()
+            if _nm in {"agent", "tools"} or _nm.endswith(" tools") or _nm.startswith("tool"):
+                return
             return
         # Emit create_agent once per agent name (best-effort detection)
         try:
@@ -1036,6 +1101,13 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             Attrs.AGENT_ID: getattr(action, "agent_id", None),
             Attrs.AZURE_RESOURCE_NAMESPACE: "Microsoft.CognitiveServices",
         }
+        # Final guard: if derived agent name is generic, skip
+        try:
+            _an = attrs.get(Attrs.AGENT_NAME)
+            if isinstance(_an, str) and _an.strip().lower() in {"agent", "tools"}:
+                return
+        except Exception:
+            pass
         # system instructions if present
         sys_inst = getattr(action, "system_instructions", None) or getattr(
             action, "instructions", None
@@ -1045,7 +1117,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             if red is not None:
                 attrs[Attrs.SYSTEM_INSTRUCTIONS] = red
         # Avoid noisy agent spans for tool-only actions
-        if isinstance(getattr(action, "tool", None), str):
+        if getattr(action, "tool", None):
             # Tool actions are recorded as execute_tool spans elsewhere
             return
         # De-duplicate invoke_agent per (parent_run_id, agent_name)
@@ -1300,6 +1372,14 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             Attrs.TOOL_CALL_ID: tool_call_id,
             Attrs.AZURE_RESOURCE_NAMESPACE: "Microsoft.CognitiveServices",
         }
+        # If parent is an agent, re-parent tool under the latest chat span
+        try:
+            if parent_run_id and hasattr(self, "_last_chat_for_parent"):
+                chat_parent = self._last_chat_for_parent.get(parent_run_id)
+                if chat_parent:
+                    parent_run_id = chat_parent
+        except Exception:
+            pass
         self._core.start(
             run_id=run_id,
             name=f"execute_tool {name}",
