@@ -411,6 +411,7 @@ class _Core:
         tracer: Any,
         default_name: Optional[str] = None,
         default_id: Optional[str] = None,
+        debug_export: bool = False,
     ) -> None:
         self.enable_content_recording = enable_content_recording
         self.redact = redact
@@ -421,6 +422,9 @@ class _Core:
         # Optional defaults for generic attributes requested by callers
         self._default_name = default_name
         self._default_id = default_id
+        # Debug/console export of span lifecycle
+        self._debug = debug_export
+        self._debug_log: List[str] = []
 
     def start(
         self,
@@ -432,6 +436,13 @@ class _Core:
         parent_run_id: Optional[UUID],
         attrs: Dict[str, Any],
     ) -> None:
+        if self._debug:
+            msg = f"START name={name} op={operation} run_id={run_id} parent={parent_run_id}"
+            self._debug_log.append(msg)
+            try:
+                print(msg)
+            except Exception:
+                pass
         parent_ctx = None
         if parent_run_id and parent_run_id in self._runs:
             parent_ctx = set_span_in_context(self._runs[parent_run_id].span)
@@ -473,6 +484,13 @@ class _Core:
         state = self._runs.pop(run_id, None)
         if not state:
             return
+        if self._debug:
+            msg = f"END op={state.operation} run_id={run_id} error={error.__class__.__name__ if error else None}"
+            self._debug_log.append(msg)
+            try:
+                print(msg)
+            except Exception:
+                pass
         if error:
             state.span.set_status(Status(StatusCode.ERROR, str(error)))
             state.span.set_attribute(Attrs.ERROR_TYPE, error.__class__.__name__)
@@ -483,6 +501,17 @@ class _Core:
         state = self._runs.get(run_id)
         if not state:
             return
+        if self._debug:
+            try:
+                keys = ",".join(sorted([k for k in attrs.keys()]))
+            except Exception:
+                keys = str(list(attrs.keys()))
+            msg = f"SET op={getattr(state,'operation',None)} run_id={run_id} keys=[{keys}]"
+            self._debug_log.append(msg)
+            try:
+                print(msg)
+            except Exception:
+                pass
         for k, v in attrs.items():
             nv = _normalize(v)
             if nv is not None:
@@ -556,6 +585,23 @@ class _Core:
             port = _extract_port(endpoint)
             if port is not None:
                 a[Attrs.SERVER_PORT] = port
+        # Provider override per backend
+        try:
+            prov = a.get(Attrs.PROVIDER_NAME)
+            ep_l = (endpoint or "").lower()
+            if ep_l:
+                if "openai.azure.com" in ep_l or "inference.ai.azure.com" in ep_l or "azure.com" in ep_l:
+                    prov = "azure.ai.inference"
+                elif "openai.com" in ep_l:
+                    prov = "openai"
+            elif serialized:
+                kw2 = serialized.get("kwargs", {}) or {}
+                if kw2.get("azure_endpoint"):
+                    prov = "azure.ai.inference"
+            if prov:
+                a[Attrs.PROVIDER_NAME] = prov
+        except Exception:
+            pass
         if tags:
             a[Attrs.METADATA_TAGS] = _safe_json(tags)
         self.enrich_langgraph(a, metadata)
@@ -1021,7 +1067,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **__: Any,
     ) -> Any:
-        """Start an agent invocation span and emit create_agent when applicable."""
+        """Emit create_agent once per agent; do not create invoke_agent here."""
         name = (
             getattr(action, "tool", None)
             or getattr(action, "log", None)
@@ -1087,27 +1133,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                 self._core.end(run_id=ca_run_id, error=None)
         except Exception:
             pass
-        attrs = {
-            Attrs.PROVIDER_NAME: self._core.provider,
-            Attrs.OPERATION_NAME: "invoke_agent",
-            Attrs.METADATA_RUN_ID: str(run_id),
-            Attrs.METADATA_PARENT_RUN_ID: str(parent_run_id) if parent_run_id else None,
-            # Prefer explicit agent_name on the action; fall back to other hints
-            Attrs.AGENT_NAME: (
-                getattr(action, "agent_name", None)
-                or getattr(action, "name", None)
-                or getattr(action, "tool", None)
-            ),
-            Attrs.AGENT_ID: getattr(action, "agent_id", None),
-            Attrs.AZURE_RESOURCE_NAMESPACE: "Microsoft.CognitiveServices",
-        }
-        # Final guard: if derived agent name is generic, skip
-        try:
-            _an = attrs.get(Attrs.AGENT_NAME)
-            if isinstance(_an, str) and _an.strip().lower() in {"agent", "tools"}:
-                return
-        except Exception:
-            pass
+        # No invoke_agent span started here
         # system instructions if present
         sys_inst = getattr(action, "system_instructions", None) or getattr(
             action, "instructions", None
@@ -1128,14 +1154,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             return
         self._active_agent_keys.add(key)
         self._agent_run_to_key[run_id] = key
-        self._core.start(
-            run_id=run_id,
-            name=f"invoke_agent {name}" if name else "invoke_agent",
-            kind=SpanKind.CLIENT,
-            operation="invoke_agent",
-            parent_run_id=parent_run_id,
-            attrs=attrs,
-        )
+        # No invoke_agent span started here
 
     def on_agent_finish(
         self,
