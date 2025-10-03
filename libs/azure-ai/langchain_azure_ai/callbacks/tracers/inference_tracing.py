@@ -995,7 +995,48 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         attrs = self._core.llm_end_attrs(result=response)
         if attrs:
             self._core.set(run_id, attrs)
-        # Cache tool calls (if any) for synthetic tool spans
+        # Emit synthetic execute_tool spans for requested tool calls (no result yet)
+        try:
+            gens: List[List[ChatGeneration]] = getattr(response, "generations", [])
+            for group in gens:
+                for gen in group:
+                    msg = getattr(gen, "message", None)
+                    tool_calls = getattr(msg, "tool_calls", None)
+                    if not tool_calls:
+                        continue
+                    for tc in tool_calls:
+                        # Extract tool metadata
+                        if isinstance(tc, dict):
+                            tc_id = tc.get("id") or tc.get("tool_call_id")
+                            fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
+                            name = fn.get("name") if isinstance(fn, dict) else tc.get("name")
+                            args = fn.get("arguments") if isinstance(fn, dict) else tc.get("arguments")
+                        else:
+                            tc_id = getattr(tc, "id", None) or getattr(tc, "tool_call_id", None)
+                            name = getattr(tc, "name", None)
+                            args = getattr(tc, "args", None) or getattr(tc, "arguments", None)
+                        # Start a synthetic execute_tool span under this chat
+                        syn_run_id = uuid4()
+                        attrs_syn = {
+                            Attrs.PROVIDER_NAME: self._core.provider,
+                            Attrs.OPERATION_NAME: "execute_tool",
+                            Attrs.TOOL_NAME: name,
+                            Attrs.TOOL_CALL_ID: tc_id,
+                            Attrs.TOOL_CALL_ARGS: (_safe_json(_try_parse_json(args)) if self._core.enable_content_recording else None),
+                            Attrs.AZURE_RESOURCE_NAMESPACE: "Microsoft.CognitiveServices",
+                        }
+                        self._core.start(
+                            run_id=syn_run_id,
+                            name=f"execute_tool {name or ''}".strip(),
+                            kind=SpanKind.INTERNAL,
+                            operation="execute_tool",
+                            parent_run_id=run_id,
+                            attrs=attrs_syn,
+                        )
+                        self._core.end(syn_run_id, None)
+        except Exception:
+            pass
+        # Cache tool calls (if any) for synthetic tool spans later when ToolMessage appears
         try:
             gens: List[List[ChatGeneration]] = getattr(response, "generations", [])
             for group in gens:
