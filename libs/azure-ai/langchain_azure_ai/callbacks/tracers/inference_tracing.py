@@ -809,6 +809,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             tracer=tracer,
             default_name=name,
             default_id=id,
+            debug_export=True,
         )
         # Cache for synthetic tool spans when on_tool_* callbacks are not fired.
         # Keyed by tool_call_id; value carries name, args, and an optional parent hint.
@@ -1212,7 +1213,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         metadata: Optional[Dict[str, Any]] = None,
         **__: Any,
     ) -> Any:
-        """Fallback: start an invoke_agent span if the agent callback didn’t fire.
+        """Fallback: start an invoke_agent span at the top-level only.
 
         Ensures a single root span exists so downstream chat/tool spans share one trace.
         """
@@ -1261,18 +1262,18 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                 if msg_attr is not None:
                     attrs[Attrs.INPUT_MESSAGES] = msg_attr
         self._core.enrich_langgraph(attrs, metadata)
-        # De-duplicate invoke_agent per (parent_run_id, agent_name)
-        key: Tuple[Optional[UUID], Optional[str]] = (parent_run_id, agent_name)
-        if key in self._active_agent_keys:
+        # Only start a root agent span when there's no parent
+        if parent_run_id is not None:
             return None
-        self._active_agent_keys.add(key)
-        self._agent_run_to_key[run_id] = key
+        # Start top-level invoke_agent
+        self._active_agent_keys.add((None, agent_name))
+        self._agent_run_to_key[run_id] = (None, agent_name)
         self._core.start(
             run_id=run_id,
             name=(f"invoke_agent {agent_name}" if agent_name else "invoke_agent"),
             kind=SpanKind.CLIENT,
             operation="invoke_agent",
-            parent_run_id=parent_run_id,
+            parent_run_id=None,
             attrs=attrs,
         )
         return None
@@ -1391,6 +1392,12 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             Attrs.TOOL_CALL_ID: tool_call_id,
             Attrs.AZURE_RESOURCE_NAMESPACE: "Microsoft.CognitiveServices",
         }
+        # Debug: print callback and parent
+        if self._core._debug:
+            try:
+                print(f"CALLBACK on_tool_start parent={parent_run_id} tool={name} id={tool_call_id}")
+            except Exception:
+                pass
         # If parent is an agent, re-parent tool under the latest chat span
         try:
             if parent_run_id and hasattr(self, "_last_chat_for_parent"):
