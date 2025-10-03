@@ -173,6 +173,87 @@ def test_streaming_token_event(monkeypatch: pytest.MonkeyPatch) -> None:
     assert event_attrs.get("gen_ai.token.preview") == "abcdef"
 
 
+def test_synthetic_execute_tool_under_chat_parent(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED", "true")
+    t = tracing.AzureAIOpenTelemetryTracer()
+    # Start root agent via chain_start
+    root = uuid4()
+    t.on_chain_start({}, {"messages": [{"role": "user", "content": "hi"}]}, run_id=root)
+    # Start a chat span
+    chat_run = uuid4()
+    serialized = {"kwargs": {"model": "m"}}
+    msgs = [[HumanMessage(content="prompt")]]
+    t.on_chat_model_start(serialized, msgs, run_id=chat_run, parent_run_id=root)
+    # End with tool_calls requested by assistant
+    tool_calls = [{"id": "call-1", "function": {"name": "get_current_date", "arguments": "{}"}, "type": "function"}]
+    gen = ChatGeneration(message=AIMessage(content="", tool_calls=tool_calls), generation_info={"finish_reason": "tool_calls"})
+    result = LLMResult(generations=[[gen]], llm_output={"token_usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+    t.on_llm_end(result, run_id=chat_run, parent_run_id=root)
+    # Last span should be a synthetic execute_tool under the chat
+    span = get_last_span_for(t)
+    assert span.name.startswith("execute_tool")
+    attrs = span.attributes
+    assert attrs.get(tracing.Attrs.OPERATION_NAME) == "execute_tool"
+    assert attrs.get(tracing.Attrs.TOOL_NAME) == "get_current_date"
+    # Conversation id should be present on chat and tools
+    chat_span = [s for s in t._core._tracer.spans if s.name.startswith("chat")][-1]
+    assert chat_span.attributes.get(tracing.Attrs.CONVERSATION_ID) == str(root)
+    assert attrs.get(tracing.Attrs.CONVERSATION_ID) == str(root)
+
+
+def test_no_invoke_agent_on_agent_action(monkeypatch: pytest.MonkeyPatch) -> None:
+    t = tracing.AzureAIOpenTelemetryTracer()
+    # on_agent_action should not start invoke_agent spans; only create_agent when applicable
+    before = len([s for s in t._core._tracer.spans if s.attributes.get(tracing.Attrs.OPERATION_NAME) == "invoke_agent"])
+    action = SimpleNamespace(agent_name="Agent", system_instructions=[{"type": "text", "content": "You are an agent."}])
+    t.on_agent_action(action, run_id=uuid4())
+    after = len([s for s in t._core._tracer.spans if s.attributes.get(tracing.Attrs.OPERATION_NAME) == "invoke_agent"])
+    assert after == before
+
+
+def test_tool_start_name_and_conversation_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    t = tracing.AzureAIOpenTelemetryTracer(enable_content_recording=True)
+    root = uuid4()
+    t.on_chain_start({}, {"messages": [{"role": "user", "content": "hi"}]}, run_id=root)
+    # Start a tool with serialized name and inputs id
+    run_id = uuid4()
+    parent_run = uuid4()  # simulate parent chat id context
+    serialized_tool = {"name": "search", "type": "function", "description": "desc"}
+    inputs = {"id": "call-1", "query": "foo"}
+    t.on_tool_start(serialized_tool, "ignored", inputs=inputs, run_id=run_id, parent_run_id=parent_run)
+    t.on_tool_end({"answer": "bar"}, run_id=run_id, parent_run_id=parent_run)
+    span = get_last_span_for(t)
+    attrs = span.attributes
+    assert attrs.get(tracing.Attrs.TOOL_NAME) == "search"
+    assert attrs.get(tracing.Attrs.TOOL_CALL_ID) == "call-1"
+    assert attrs.get(tracing.Attrs.CONVERSATION_ID) == str(root)
+
+
+def test_finish_reasons_normalized() -> None:
+    t = tracing.AzureAIOpenTelemetryTracer()
+    chat_run = uuid4()
+    gen = ChatGeneration(message=AIMessage(content=""), generation_info={"finish_reason": "tool_calls"})
+    result = LLMResult(generations=[[gen]], llm_output={})
+    # Create chat span and then end it
+    t.on_llm_start({"kwargs": {"model": "m"}}, ["hi"], run_id=chat_run)
+    t.on_llm_end(result, run_id=chat_run)
+    span = [s for s in t._core._tracer.spans if s.name.startswith("chat")][-1]
+    # Aggregated finish reasons should be normalized to singular
+    assert span.attributes.get(tracing.Attrs.RESPONSE_FINISH_REASONS) == ["tool_call"]
+
+
+def test_chat_parenting_under_root_agent(monkeypatch: pytest.MonkeyPatch) -> None:
+    t = tracing.AzureAIOpenTelemetryTracer()
+    root = uuid4()
+    # Start root agent
+    t.on_chain_start({}, {"messages": [{"role": "user", "content": "hi"}]}, run_id=root)
+    # Start chat without specifying parent; should parent under root agent
+    chat_run = uuid4()
+    t.on_llm_start({"kwargs": {"model": "m"}}, ["hello"], run_id=chat_run)
+    span = get_last_span_for(t)
+    assert span.attributes.get(tracing.Attrs.METADATA_PARENT_RUN_ID) == str(root)
+
+
 def test_llm_error_sets_status_and_exception(monkeypatch: pytest.MonkeyPatch) -> None:
     t = tracing.AzureAIOpenTelemetryTracer()
     run_id = uuid4()

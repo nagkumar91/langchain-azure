@@ -423,7 +423,7 @@ class _Core:
         self._default_name = default_name
         self._default_id = default_id
         # Debug/console export of span lifecycle
-        self._debug = debug_export
+        self._debug = False
         self._debug_log: List[str] = []
 
     def start(
@@ -436,13 +436,7 @@ class _Core:
         parent_run_id: Optional[UUID],
         attrs: Dict[str, Any],
     ) -> None:
-        if self._debug:
-            msg = f"START name={name} op={operation} run_id={run_id} parent={parent_run_id}"
-            self._debug_log.append(msg)
-            try:
-                print(msg)
-            except Exception:
-                pass
+        # console debug disabled
         parent_ctx = None
         if parent_run_id and parent_run_id in self._runs:
             parent_ctx = set_span_in_context(self._runs[parent_run_id].span)
@@ -484,13 +478,7 @@ class _Core:
         state = self._runs.pop(run_id, None)
         if not state:
             return
-        if self._debug:
-            msg = f"END op={state.operation} run_id={run_id} error={error.__class__.__name__ if error else None}"
-            self._debug_log.append(msg)
-            try:
-                print(msg)
-            except Exception:
-                pass
+        # console debug disabled
         if error:
             state.span.set_status(Status(StatusCode.ERROR, str(error)))
             state.span.set_attribute(Attrs.ERROR_TYPE, error.__class__.__name__)
@@ -501,17 +489,7 @@ class _Core:
         state = self._runs.get(run_id)
         if not state:
             return
-        if self._debug:
-            try:
-                keys = ",".join(sorted([k for k in attrs.keys()]))
-            except Exception:
-                keys = str(list(attrs.keys()))
-            msg = f"SET op={getattr(state,'operation',None)} run_id={run_id} keys=[{keys}]"
-            self._debug_log.append(msg)
-            try:
-                print(msg)
-            except Exception:
-                pass
+        # console debug disabled
         for k, v in attrs.items():
             nv = _normalize(v)
             if nv is not None:
@@ -809,7 +787,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             tracer=tracer,
             default_name=name,
             default_id=id,
-            debug_export=True,
+            debug_export=False,
         )
         # Cache for synthetic tool spans when on_tool_* callbacks are not fired.
         # Keyed by tool_call_id; value carries name, args, and an optional parent hint.
@@ -1461,11 +1439,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         except Exception:
             pass
         # Debug: print callback and parent
-        if self._core._debug:
-            try:
-                print(f"CALLBACK on_tool_start parent={parent_run_id} tool={name} id={tool_call_id}")
-            except Exception:
-                pass
+        # console debug disabled
         # If parent is an agent, re-parent tool under the latest chat span
         try:
             if parent_run_id and hasattr(self, "_last_chat_for_parent"):
