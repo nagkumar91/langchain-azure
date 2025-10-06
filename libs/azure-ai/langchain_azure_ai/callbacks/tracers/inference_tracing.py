@@ -1057,9 +1057,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             self._core.set(run_id, attrs)
         # Emit synthetic execute_tool spans for requested tool calls (no result yet)
         try:
-            gens2: List[List[ChatGeneration]] = getattr(
-                response, "generations", []
-            )
+            gens2: List[List[ChatGeneration]] = getattr(response, "generations", [])
             for group in gens2:
                 for gen in group:
                     msg = getattr(gen, "message", None)
