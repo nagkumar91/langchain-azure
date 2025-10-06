@@ -1104,7 +1104,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                                 if self._core.enable_content_recording
                                 else None
                             ),
-                            Attrs.AZURE_RESOURCE_NAMESPACE: "Microsoft.CognitiveServices",
+                            Attrs.AZURE_RESOURCE_NAMESPACE:
+                                "Microsoft.CognitiveServices",
                         }
                         # Attach conversation id when available
                         try:
