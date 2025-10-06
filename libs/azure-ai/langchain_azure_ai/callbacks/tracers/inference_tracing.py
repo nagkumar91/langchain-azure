@@ -113,6 +113,7 @@ def _safe_json(obj: Any) -> str:
     except Exception:  # pragma: no cover
         return '"<unserializable>"'
 
+
 def _try_parse_json(s: Any) -> Any:
     """Best-effort parse a JSON string, otherwise return the original value."""
     if isinstance(s, str):
@@ -278,9 +279,7 @@ def _redact(messages_json: str) -> str:
                         red_threads.append(red_thread)
                     else:
                         # Preserve unknown shapes
-                        red_threads.append(
-                            [{"type": "text", "content": "[REDACTED]"}]
-                        )
+                        red_threads.append([{"type": "text", "content": "[REDACTED]"}])
                 return _safe_json(red_threads)
             # Flat list of items: system instructions, outputs, etc.
             red_items: List[Dict[str, Any]] = []
@@ -408,6 +407,8 @@ def _redact_role_parts_messages(msgs: List[Dict[str, Any]]) -> List[Dict[str, An
             }
         )
     return red
+
+
 @dataclass
 class _Run:
     span: Span
@@ -827,6 +828,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         # Track active invoke_agent spans to avoid duplicates per (parent, agent)
         self._active_agent_keys: set[Tuple[Optional[UUID], Optional[str]]] = set()
         self._agent_run_to_key: Dict[UUID, Tuple[Optional[UUID], Optional[str]]] = {}
+
         # Helper: detect active invoke_agent spans
         def _has_active_invoke_agent() -> bool:
             try:
@@ -836,6 +838,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                 )
             except Exception:
                 return False
+
         # Bind helper as method
         setattr(self, "_has_active_invoke_agent", _has_active_invoke_agent)
 
@@ -914,8 +917,10 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         # parent chat under the root invoke_agent
         try:
             if (
-                parent_run_id is None or parent_run_id not in self._core._runs
-            ) and hasattr(self, "_root_agent_run_id") and self._root_agent_run_id:
+                (parent_run_id is None or parent_run_id not in self._core._runs)
+                and hasattr(self, "_root_agent_run_id")
+                and self._root_agent_run_id
+            ):
                 parent_run_id = self._root_agent_run_id
                 attrs[Attrs.METADATA_PARENT_RUN_ID] = str(parent_run_id)
         except Exception:
@@ -972,8 +977,10 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         # parent chat under the root invoke_agent
         try:
             if (
-                parent_run_id is None or parent_run_id not in self._core._runs
-            ) and hasattr(self, "_root_agent_run_id") and self._root_agent_run_id:
+                (parent_run_id is None or parent_run_id not in self._core._runs)
+                and hasattr(self, "_root_agent_run_id")
+                and self._root_agent_run_id
+            ):
                 parent_run_id = self._root_agent_run_id
                 attrs[Attrs.METADATA_PARENT_RUN_ID] = str(parent_run_id)
         except Exception:
@@ -1001,13 +1008,10 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                                 Attrs.OPERATION_NAME: "execute_tool",
                                 Attrs.TOOL_NAME: name or meta.get("name"),
                                 Attrs.TOOL_CALL_ID: tc_id,
-                                Attrs.AZURE_RESOURCE_NAMESPACE:
-                                    "Microsoft.CognitiveServices",
+                                Attrs.AZURE_RESOURCE_NAMESPACE: "Microsoft.CognitiveServices",
                             }
                             if self._core.enable_content_recording and ("args" in meta):
-                                t_attrs[Attrs.TOOL_CALL_ARGS] = _safe_json(
-                                    meta["args"]
-                                )
+                                t_attrs[Attrs.TOOL_CALL_ARGS] = _safe_json(meta["args"])
                             self._core.start(
                                 run_id=run_tool_id,
                                 name=(
@@ -1070,9 +1074,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                             if args is None:
                                 args = tc.get("arguments")
                         else:
-                            tc_id = (
-                                getattr(tc, "id", None)
-                                or getattr(tc, "tool_call_id", None)
+                            tc_id = getattr(tc, "id", None) or getattr(
+                                tc, "tool_call_id", None
                             )
                             # Some ToolCall-like objects expose function
                             # with name/arguments
@@ -1083,9 +1086,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                             if name is None:
                                 name = getattr(tc, "name", None)
                             if args is None:
-                                args = (
-                                    getattr(tc, "args", None)
-                                    or getattr(tc, "arguments", None)
+                                args = getattr(tc, "args", None) or getattr(
+                                    tc, "arguments", None
                                 )
                         # Final fallback for name
                         if not name:
@@ -1102,8 +1104,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                                 if self._core.enable_content_recording
                                 else None
                             ),
-                            Attrs.AZURE_RESOURCE_NAMESPACE:
-                                "Microsoft.CognitiveServices",
+                            Attrs.AZURE_RESOURCE_NAMESPACE: "Microsoft.CognitiveServices",
                         }
                         # Attach conversation id when available
                         try:
@@ -1284,9 +1285,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             pass
         # No invoke_agent span started here
         # system instructions if present
-        sys_inst = (
-            getattr(action, "system_instructions", None)
-            or getattr(action, "instructions", None)
+        sys_inst = getattr(action, "system_instructions", None) or getattr(
+            action, "instructions", None
         )
         if sys_inst and self._core.enable_content_recording:
             red = self._core.redact_messages(_safe_json(sys_inst))
@@ -2132,8 +2132,8 @@ def _generations_to_role_parts(
                     else:
                         tc_id = getattr(tc, "id", None)
                         name = getattr(tc, "name", None)
-                        args = (
-                            getattr(tc, "args", None) or getattr(tc, "arguments", None)
+                        args = getattr(tc, "args", None) or getattr(
+                            tc, "arguments", None
                         )
                         parts.append(
                             {
