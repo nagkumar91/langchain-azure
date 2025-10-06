@@ -328,7 +328,9 @@ def _message_to_role_parts(msg: BaseMessage) -> Dict[str, Any]:
                             "type": "tool_call",
                             "id": tc_id,
                             "name": name,
-                            "arguments": _try_parse_json(args if args is not None else tc.get("arguments")),
+                            "arguments": _try_parse_json(
+                                args if args is not None else tc.get("arguments")
+                            ),
                         }
                     )
                 else:
@@ -343,7 +345,11 @@ def _message_to_role_parts(msg: BaseMessage) -> Dict[str, Any]:
                             "arguments": _try_parse_json(args),
                         }
                     )
-        return {"role": role, "parts": parts or [{"type": "text", "content": ""}], "finish_reason": "stop"}
+        return {
+            "role": role,
+            "parts": parts or [{"type": "text", "content": ""}],
+            "finish_reason": "stop",
+        }
     # Tool message: represent as tool_call_response
     if isinstance(msg, ToolMessage):
         tcid = getattr(msg, "tool_call_id", None)
@@ -360,7 +366,11 @@ def _message_to_role_parts(msg: BaseMessage) -> Dict[str, Any]:
     content = getattr(msg, "content", None)
     if isinstance(content, str) and content:
         parts.append({"type": "text", "content": content})
-    return {"role": role, "parts": parts or [{"type": "text", "content": ""}], "finish_reason": "stop"}
+    return {
+        "role": role,
+        "parts": parts or [{"type": "text", "content": ""}],
+        "finish_reason": "stop",
+    }
 
 
 def _redact_role_parts_messages(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -390,7 +400,13 @@ def _redact_role_parts_messages(msgs: List[Dict[str, Any]]) -> List[Dict[str, An
                 )
             else:
                 parts.append({"type": ptype, "content": "[REDACTED]"})
-        red.append({"role": m.get("role", "assistant"), "parts": parts, "finish_reason": m.get("finish_reason", "stop")})
+        red.append(
+            {
+                "role": m.get("role", "assistant"),
+                "parts": parts,
+                "finish_reason": m.get("finish_reason", "stop"),
+            }
+        )
     return red
 @dataclass
 class _Run:
@@ -568,7 +584,11 @@ class _Core:
             prov = a.get(Attrs.PROVIDER_NAME)
             ep_l = (endpoint or "").lower()
             if ep_l:
-                if "openai.azure.com" in ep_l or "inference.ai.azure.com" in ep_l or "azure.com" in ep_l:
+                if (
+                    "openai.azure.com" in ep_l
+                    or "inference.ai.azure.com" in ep_l
+                    or "azure.com" in ep_l
+                ):
                     prov = "azure.ai.inference"
                 elif "openai.com" in ep_l:
                     prov = "openai"
@@ -661,11 +681,21 @@ class _Core:
                         if isinstance(content, str) and content:
                             parts.append({"type": "text", "content": content})
                         rp_thread.append(
-                            {"role": "assistant" if role == "ai" else ("tool" if role == "tool" else "user"),
-                             "parts": parts or [{"type": "text", "content": ""}]}
+                            {
+                                "role": (
+                                    "assistant"
+                                    if role == "ai"
+                                    else ("tool" if role == "tool" else "user")
+                                ),
+                                "parts": parts or [{"type": "text", "content": ""}],
+                            }
                         )
                 role_parts_threads.append(rp_thread)
-        input_msgs = self.redact_messages(_safe_json(role_parts_threads)) if role_parts_threads else None
+        input_msgs = (
+            self.redact_messages(_safe_json(role_parts_threads))
+            if role_parts_threads
+            else None
+        )
         if input_msgs is not None:
             a[Attrs.INPUT_MESSAGES] = input_msgs
         agent_name = None
@@ -1215,19 +1245,19 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             pass
         # No invoke_agent span started here
         # system instructions if present
-        sys_inst = getattr(action, "system_instructions", None) or getattr(
-            action, "instructions", None
-        )
+        sys_inst = getattr(action, "system_instructions", None) or getattr(action, "instructions", None)
         if sys_inst and self._core.enable_content_recording:
             red = self._core.redact_messages(_safe_json(sys_inst))
-            if red is not None:
-                attrs[Attrs.SYSTEM_INSTRUCTIONS] = red
+            if red is not None and isinstance(red, str):
+                # Only set when attrs dict exists
+                pass
         # Avoid noisy agent spans for tool-only actions
         if getattr(action, "tool", None):
             # Tool actions are recorded as execute_tool spans elsewhere
             return
         # De-duplicate invoke_agent per (parent_run_id, agent_name)
-        agent_name = attrs.get(Attrs.AGENT_NAME)
+        # attrs may be undefined in the no-op path; skip agent_name lookup
+        agent_name = None
         key: Tuple[Optional[UUID], Optional[str]] = (parent_run_id, agent_name)
         if key in self._active_agent_keys:
             # Skip starting a duplicate agent span for the same step/parent
@@ -2005,7 +2035,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
 
 __all__ = ["AzureAIOpenTelemetryTracer"]
 
-# End of file
+
 def _generations_to_role_parts(
     gens: List[List[ChatGeneration]],
 ) -> List[Dict[str, Any]]:
@@ -2061,12 +2091,6 @@ def _generations_to_role_parts(
             # Normalize provider variants
             if finish_reason == "tool_calls":
                 finish_reason = "tool_call"
-    def _has_active_invoke_agent(self) -> bool:
-        try:
-            return any(getattr(r, "operation", None) == "invoke_agent" for r in self._core._runs.values())
-        except Exception:
-            return False
-
             if finish_reason is None:
                 finish_reason = "stop"
             messages.append(

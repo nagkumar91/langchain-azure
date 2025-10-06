@@ -192,10 +192,14 @@ def test_synthetic_execute_tool_under_chat_parent(monkeypatch: pytest.MonkeyPatc
     t.on_chat_model_start(serialized, msgs, run_id=chat_run, parent_run_id=root)
     # End with tool_calls requested by assistant
     # Provide tool_calls via additional_kwargs to match LC parsing
-    tool_calls = [{"id": "call-1", "function": {"name": "get_current_date", "arguments": "{}"}}]
+    tool_calls = [
+        {"id": "call-1", "function": {"name": "get_current_date", "arguments": "{}"}}
+    ]
     ai_msg = AIMessage(content="", additional_kwargs={"tool_calls": tool_calls})
     gen = ChatGeneration(message=ai_msg, generation_info={"finish_reason": "tool_calls"})
-    result = LLMResult(generations=[[gen]], llm_output={"token_usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+    result = LLMResult(
+        generations=[[gen]], llm_output={"token_usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+    )
     t.on_llm_end(result, run_id=chat_run, parent_run_id=root)
     # Last span should be a synthetic execute_tool under the chat
     span = get_last_span_for(t)
@@ -212,10 +216,22 @@ def test_synthetic_execute_tool_under_chat_parent(monkeypatch: pytest.MonkeyPatc
 def test_no_invoke_agent_on_agent_action(monkeypatch: pytest.MonkeyPatch) -> None:
     t = tracing.AzureAIOpenTelemetryTracer()
     # on_agent_action should not start invoke_agent spans; only create_agent when applicable
-    before = len([s for s in t._core._tracer.spans if s.attributes.get(tracing.Attrs.OPERATION_NAME) == "invoke_agent"])
+    before = len(
+        [
+            s
+            for s in t._core._tracer.spans
+            if s.attributes.get(tracing.Attrs.OPERATION_NAME) == "invoke_agent"
+        ]
+    )
     action = SimpleNamespace(agent_name="Agent", system_instructions=[{"type": "text", "content": "You are an agent."}])
     t.on_agent_action(action, run_id=uuid4())
-    after = len([s for s in t._core._tracer.spans if s.attributes.get(tracing.Attrs.OPERATION_NAME) == "invoke_agent"])
+    after = len(
+        [
+            s
+            for s in t._core._tracer.spans
+            if s.attributes.get(tracing.Attrs.OPERATION_NAME) == "invoke_agent"
+        ]
+    )
     assert after == before
 
 
