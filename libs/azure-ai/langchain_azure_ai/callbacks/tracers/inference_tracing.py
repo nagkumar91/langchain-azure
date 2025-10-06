@@ -1008,7 +1008,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                                 Attrs.OPERATION_NAME: "execute_tool",
                                 Attrs.TOOL_NAME: name or meta.get("name"),
                                 Attrs.TOOL_CALL_ID: tc_id,
-                                Attrs.AZURE_RESOURCE_NAMESPACE: "Microsoft.CognitiveServices",
+                                Attrs.AZURE_RESOURCE_NAMESPACE: "Microsoft."
+                                "CognitiveServices",
                             }
                             if self._core.enable_content_recording and ("args" in meta):
                                 t_attrs[Attrs.TOOL_CALL_ARGS] = _safe_json(meta["args"])
@@ -1104,8 +1105,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                                 if self._core.enable_content_recording
                                 else None
                             ),
-                            Attrs.AZURE_RESOURCE_NAMESPACE:
-                                "Microsoft.CognitiveServices",
+                            Attrs.AZURE_RESOURCE_NAMESPACE: "Microsoft."
+                            "CognitiveServices",
                         }
                         # Attach conversation id when available
                         try:
