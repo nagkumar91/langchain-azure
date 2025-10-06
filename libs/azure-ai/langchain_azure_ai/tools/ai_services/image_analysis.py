@@ -4,20 +4,36 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, Optional
+from typing import Annotated, Any, Dict, Optional
 
-from azure.ai.vision.imageanalysis import ImageAnalysisClient
-from azure.ai.vision.imageanalysis.models import VisualFeatures
 from azure.core.exceptions import HttpResponseError
 from langchain_core.callbacks import CallbackManagerForToolRun
-from langchain_core.tools import BaseTool
+from langchain_core.tools import ArgsSchema, BaseTool
 from langchain_core.utils import pre_init
-from pydantic import PrivateAttr, model_validator
+from pydantic import BaseModel, PrivateAttr, SkipValidation, model_validator
 
 from langchain_azure_ai._resources import AIServicesService
 from langchain_azure_ai.utils.utils import detect_file_src_type
 
+try:
+    from azure.ai.vision.imageanalysis import ImageAnalysisClient
+    from azure.ai.vision.imageanalysis.models import VisualFeatures
+except ImportError:
+    raise ImportError(
+        "To use Azure AI Image Analysis tool, please install the"
+        "'azure-ai-vision-imageanalysis' package: "
+        "`pip install azure-ai-vision-imageanalysis` or install the 'tools' "
+        "extra: `pip install langchain-azure-ai[tools]`"
+    )
+
 logger = logging.getLogger(__name__)
+
+
+class ImageInput(BaseModel):
+    """The input document for the Azure AI Image Analysis tool."""
+
+    image_path: str
+    """The path or URL to the image to analyze."""
 
 
 class AzureAIImageAnalysisTool(BaseTool, AIServicesService):
@@ -36,6 +52,9 @@ class AzureAIImageAnalysisTool(BaseTool, AIServicesService):
         "Useful for when you need to analyze images. "
         "Input should be a url to an image."
     )
+
+    args_schema: Annotated[Optional[ArgsSchema], SkipValidation()] = ImageInput
+    """The input args schema for the tool."""
 
     visual_features: Optional[VisualFeatures] = None
 
@@ -148,17 +167,15 @@ class AzureAIImageAnalysisTool(BaseTool, AIServicesService):
 
     def _run(
         self,
-        query: str,
+        image_path: str,
         run_manager: Optional[CallbackManagerForToolRun] = None,
     ) -> str:
         """Use the tool."""
-        # try:
-        print(f"Running {self.name} with query: {query}")
+        try:
+            image_analysis_result = self._image_analysis(image_path)
+            if not image_analysis_result:
+                return "No good image analysis result was found"
 
-        image_analysis_result = self._image_analysis(query)
-        if not image_analysis_result:
-            return "No good image analysis result was found"
-
-        return self._format_image_analysis_result(image_analysis_result)
-        # except Exception as e:
-        #    raise RuntimeError(f"Error while running {self.name}: {e}")
+            return self._format_image_analysis_result(image_analysis_result)
+        except Exception as e:
+            raise RuntimeError(f"Error while running {self.name}: {e}")
