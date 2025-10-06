@@ -179,7 +179,9 @@ def test_streaming_token_event(monkeypatch: pytest.MonkeyPatch) -> None:
     assert event_attrs.get("gen_ai.token.preview") == "abcdef"
 
 
-def test_synthetic_execute_tool_under_chat_parent(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_synthetic_execute_tool_under_chat_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED", "true")
     t = tracing.AzureAIOpenTelemetryTracer()
     # Start root agent via chain_start
@@ -193,12 +195,18 @@ def test_synthetic_execute_tool_under_chat_parent(monkeypatch: pytest.MonkeyPatc
     # End with tool_calls requested by assistant
     # Provide tool_calls via additional_kwargs to match LC parsing
     tool_calls = [
-        {"id": "call-1", "function": {"name": "get_current_date", "arguments": "{}"}}
+        {
+            "id": "call-1",
+            "function": {"name": "get_current_date", "arguments": "{}"},
+        }
     ]
     ai_msg = AIMessage(content="", additional_kwargs={"tool_calls": tool_calls})
-    gen = ChatGeneration(message=ai_msg, generation_info={"finish_reason": "tool_calls"})
+    gen = ChatGeneration(
+        message=ai_msg, generation_info={"finish_reason": "tool_calls"}
+    )
     result = LLMResult(
-        generations=[[gen]], llm_output={"token_usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+        generations=[[gen]],
+        llm_output={"token_usage": {"prompt_tokens": 1, "completion_tokens": 1}},
     )
     t.on_llm_end(result, run_id=chat_run, parent_run_id=root)
     # Last span should be a synthetic execute_tool under the chat
@@ -213,9 +221,12 @@ def test_synthetic_execute_tool_under_chat_parent(monkeypatch: pytest.MonkeyPatc
     assert attrs.get(tracing.Attrs.CONVERSATION_ID) == str(root)
 
 
-def test_no_invoke_agent_on_agent_action(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_invoke_agent_on_agent_action(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     t = tracing.AzureAIOpenTelemetryTracer()
-    # on_agent_action should not start invoke_agent spans; only create_agent when applicable
+    # on_agent_action should not start invoke_agent spans;
+    # only create_agent when applicable
     before = len(
         [
             s
@@ -223,7 +234,10 @@ def test_no_invoke_agent_on_agent_action(monkeypatch: pytest.MonkeyPatch) -> Non
             if s.attributes.get(tracing.Attrs.OPERATION_NAME) == "invoke_agent"
         ]
     )
-    action = SimpleNamespace(agent_name="Agent", system_instructions=[{"type": "text", "content": "You are an agent."}])
+    action = SimpleNamespace(
+        agent_name="Agent",
+        system_instructions=[{"type": "text", "content": "You are an agent."}],
+    )
     t.on_agent_action(action, run_id=uuid4())
     after = len(
         [
@@ -244,7 +258,13 @@ def test_tool_start_name_and_conversation_id(monkeypatch: pytest.MonkeyPatch) ->
     parent_run = uuid4()  # simulate parent chat id context
     serialized_tool = {"name": "search", "type": "function", "description": "desc"}
     inputs = {"id": "call-1", "query": "foo"}
-    t.on_tool_start(serialized_tool, "ignored", inputs=inputs, run_id=run_id, parent_run_id=parent_run)
+    t.on_tool_start(
+        serialized_tool,
+        "ignored",
+        inputs=inputs,
+        run_id=run_id,
+        parent_run_id=parent_run,
+    )
     t.on_tool_end({"answer": "bar"}, run_id=run_id, parent_run_id=parent_run)
     span = get_last_span_for(t)
     attrs = span.attributes
@@ -256,7 +276,10 @@ def test_tool_start_name_and_conversation_id(monkeypatch: pytest.MonkeyPatch) ->
 def test_finish_reasons_normalized() -> None:
     t = tracing.AzureAIOpenTelemetryTracer()
     chat_run = uuid4()
-    gen = ChatGeneration(message=AIMessage(content=""), generation_info={"finish_reason": "tool_calls"})
+    gen = ChatGeneration(
+        message=AIMessage(content=""),
+        generation_info={"finish_reason": "tool_calls"},
+    )
     result = LLMResult(generations=[[gen]], llm_output={})
     # Create chat span and then end it
     t.on_llm_start({"kwargs": {"model": "m"}}, ["hi"], run_id=chat_run)
