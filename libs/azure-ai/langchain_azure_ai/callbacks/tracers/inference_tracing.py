@@ -842,6 +842,16 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         # Bind helper as method
         setattr(self, "_has_active_invoke_agent", _has_active_invoke_agent)
 
+    def _has_active_invoke_agent(self) -> bool:
+        """Return True if any currently active span is an invoke_agent."""
+        try:
+            return any(
+                getattr(r, "operation", None) == "invoke_agent"
+                for r in self._core._runs.values()
+            )
+        except Exception:
+            return False
+
     def on_chat_model_start(
         self,
         serialized: Dict[str, Any],
@@ -1008,8 +1018,9 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                                 Attrs.OPERATION_NAME: "execute_tool",
                                 Attrs.TOOL_NAME: name or meta.get("name"),
                                 Attrs.TOOL_CALL_ID: tc_id,
-                                Attrs.AZURE_RESOURCE_NAMESPACE: "Microsoft."
-                                "CognitiveServices",
+                                Attrs.AZURE_RESOURCE_NAMESPACE: (
+                                    "Microsoft.CognitiveServices"
+                                ),
                             }
                             if self._core.enable_content_recording and ("args" in meta):
                                 t_attrs[Attrs.TOOL_CALL_ARGS] = _safe_json(meta["args"])
@@ -1046,8 +1057,10 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             self._core.set(run_id, attrs)
         # Emit synthetic execute_tool spans for requested tool calls (no result yet)
         try:
-            gens: List[List[ChatGeneration]] = getattr(response, "generations", [])
-            for group in gens:
+            gens2: List[List[ChatGeneration]] = getattr(
+                response, "generations", []
+            )
+            for group in gens2:
                 for gen in group:
                     msg = getattr(gen, "message", None)
                     # Support both message.tool_calls and additional_kwargs.tool_calls
@@ -1105,8 +1118,9 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                                 if self._core.enable_content_recording
                                 else None
                             ),
-                            Attrs.AZURE_RESOURCE_NAMESPACE: "Microsoft."
-                            "CognitiveServices",
+                            Attrs.AZURE_RESOURCE_NAMESPACE: (
+                                "Microsoft.CognitiveServices"
+                            ),
                         }
                         # Attach conversation id when available
                         try:
