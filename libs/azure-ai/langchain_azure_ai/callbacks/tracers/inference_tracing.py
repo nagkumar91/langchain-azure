@@ -797,6 +797,14 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         # Track active invoke_agent spans to avoid duplicates per (parent, agent)
         self._active_agent_keys: set[Tuple[Optional[UUID], Optional[str]]] = set()
         self._agent_run_to_key: Dict[UUID, Tuple[Optional[UUID], Optional[str]]] = {}
+        # Helper: detect active invoke_agent spans
+        def _has_active_invoke_agent() -> bool:
+            try:
+                return any(getattr(r, "operation", None) == "invoke_agent" for r in self._core._runs.values())
+            except Exception:
+                return False
+        # Bind helper as method
+        setattr(self, "_has_active_invoke_agent", _has_active_invoke_agent)
 
     def on_chat_model_start(
         self,
@@ -873,6 +881,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         try:
             if (parent_run_id is None or parent_run_id not in self._core._runs) and hasattr(self, "_root_agent_run_id") and self._root_agent_run_id:
                 parent_run_id = self._root_agent_run_id
+                attrs[Attrs.METADATA_PARENT_RUN_ID] = str(parent_run_id)
         except Exception:
             pass
         self._core.start(
@@ -927,6 +936,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         try:
             if (parent_run_id is None or parent_run_id not in self._core._runs) and hasattr(self, "_root_agent_run_id") and self._root_agent_run_id:
                 parent_run_id = self._root_agent_run_id
+                attrs[Attrs.METADATA_PARENT_RUN_ID] = str(parent_run_id)
         except Exception:
             pass
         self._core.start(
@@ -991,20 +1001,44 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             for group in gens:
                 for gen in group:
                     msg = getattr(gen, "message", None)
+                    # Support both message.tool_calls and additional_kwargs.tool_calls
                     tool_calls = getattr(msg, "tool_calls", None)
+                    if not tool_calls and hasattr(msg, "additional_kwargs"):
+                        ak = getattr(msg, "additional_kwargs", {}) or {}
+                        tool_calls = ak.get("tool_calls")
                     if not tool_calls:
                         continue
                     for tc in tool_calls:
-                        # Extract tool metadata
+                        # Extract tool metadata in dict or object shapes
+                        name = None
+                        args = None
+                        tc_id = None
                         if isinstance(tc, dict):
                             tc_id = tc.get("id") or tc.get("tool_call_id")
-                            fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
-                            name = fn.get("name") if isinstance(fn, dict) else tc.get("name")
-                            args = fn.get("arguments") if isinstance(fn, dict) else tc.get("arguments")
+                            fn = tc.get("function") or {}
+                            # function may be dict with name/arguments
+                            if isinstance(fn, dict):
+                                name = fn.get("name")
+                                args = fn.get("arguments")
+                            # fallback to top-level keys
+                            if name is None:
+                                name = tc.get("name")
+                            if args is None:
+                                args = tc.get("arguments")
                         else:
                             tc_id = getattr(tc, "id", None) or getattr(tc, "tool_call_id", None)
-                            name = getattr(tc, "name", None)
-                            args = getattr(tc, "args", None) or getattr(tc, "arguments", None)
+                            # Some ToolCall-like objects expose function with name/arguments
+                            fn = getattr(tc, "function", None)
+                            if isinstance(fn, dict):
+                                name = fn.get("name")
+                                args = fn.get("arguments")
+                            if name is None:
+                                name = getattr(tc, "name", None)
+                            if args is None:
+                                args = getattr(tc, "args", None) or getattr(tc, "arguments", None)
+                        # Final fallback for name
+                        if not name:
+                            name = "tool"
                         # Start a synthetic execute_tool span under this chat
                         syn_run_id = uuid4()
                         attrs_syn = {
@@ -1015,6 +1049,12 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                             Attrs.TOOL_CALL_ARGS: (_safe_json(_try_parse_json(args)) if self._core.enable_content_recording else None),
                             Attrs.AZURE_RESOURCE_NAMESPACE: "Microsoft.CognitiveServices",
                         }
+                        # Attach conversation id when available
+                        try:
+                            if hasattr(self, "_root_agent_run_id") and self._root_agent_run_id:
+                                attrs_syn[Attrs.CONVERSATION_ID] = str(self._root_agent_run_id)
+                        except Exception:
+                            pass
                         self._core.start(
                             run_id=syn_run_id,
                             name=f"execute_tool {name or ''}".strip(),
