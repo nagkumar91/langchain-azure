@@ -50,9 +50,9 @@ except ImportError as e:  # pragma: no cover
 logging.getLogger("azure.core.pipeline.policies.http_logging_policy").setLevel(
     logging.WARNING
 )
-logging.getLogger(
-    "azure.monitor.opentelemetry.exporter.export._base"
-).setLevel(logging.WARNING)
+logging.getLogger("azure.monitor.opentelemetry.exporter.export._base").setLevel(
+    logging.WARNING
+)
 
 
 class Attrs:
@@ -167,9 +167,7 @@ def _extract_port(endpoint: Optional[str]) -> Optional[int]:
         if port is None:
             return None
         # Default ports: 80 for http, 443 for https
-        if (p.scheme == "https" and port == 443) or (
-            p.scheme == "http" and port == 80
-        ):
+        if (p.scheme == "https" and port == 443) or (p.scheme == "http" and port == 80):
             return None
         return int(port)
     except Exception:  # pragma: no cover
@@ -290,9 +288,7 @@ def _redact(messages_json: str) -> str:
                         red_threads.append(red_thread)
                     else:
                         # Preserve unknown shapes
-                        red_threads.append(
-                            [{"type": "text", "content": "[REDACTED]"}]
-                        )
+                        red_threads.append([{"type": "text", "content": "[REDACTED]"}])
                 return _safe_json(red_threads)
             # Flat list of items: system instructions, outputs, etc.
             red_items: List[Dict[str, Any]] = []
@@ -337,29 +333,21 @@ def _message_to_role_parts(msg: BaseMessage) -> Dict[str, Any]:
                     tc_id = tc.get("id")
                     func = tc.get("function") or {}
                     name = func.get("name") or tc.get("name")
-                    args = (
-                        func.get("arguments")
-                        if isinstance(func, dict)
-                        else None
-                    )
+                    args = func.get("arguments") if isinstance(func, dict) else None
                     parts.append(
                         {
                             "type": "tool_call",
                             "id": tc_id,
                             "name": name,
                             "arguments": _try_parse_json(
-                                args
-                                if args is not None
-                                else tc.get("arguments")
+                                args if args is not None else tc.get("arguments")
                             ),
                         }
                     )
                 else:
                     tc_id = getattr(tc, "id", None)
                     name = getattr(tc, "name", None)
-                    args = getattr(tc, "args", None) or getattr(
-                        tc, "arguments", None
-                    )
+                    args = getattr(tc, "args", None) or getattr(tc, "arguments", None)
                     parts.append(
                         {
                             "type": "tool_call",
@@ -492,12 +480,8 @@ class _Core:
             else:
                 finished_ctx = self._finished_span_contexts.get(parent_run_id)
                 if finished_ctx is not None:
-                    parent_ctx = set_span_in_context(
-                        NonRecordingSpan(finished_ctx)
-                    )
-        span = self._tracer.start_span(
-            name=name, kind=kind, context=parent_ctx
-        )
+                    parent_ctx = set_span_in_context(NonRecordingSpan(finished_ctx))
+        span = self._tracer.start_span(name=name, kind=kind, context=parent_ctx)
         for k, v in attrs.items():
             nv = _normalize(v)
             if nv is not None:
@@ -541,19 +525,14 @@ class _Core:
             if ctx is not None and getattr(ctx, "is_valid", False):
                 self._finished_span_contexts[run_id] = ctx
                 self._finished_context_order.append(run_id)
-                if (
-                    len(self._finished_context_order)
-                    > self._context_cache_limit
-                ):
+                if len(self._finished_context_order) > self._context_cache_limit:
                     old = self._finished_context_order.popleft()
                     self._finished_span_contexts.pop(old, None)
         except Exception:
             pass
         if error:
             state.span.set_status(Status(StatusCode.ERROR, str(error)))
-            state.span.set_attribute(
-                Attrs.ERROR_TYPE, error.__class__.__name__
-            )
+            state.span.set_attribute(Attrs.ERROR_TYPE, error.__class__.__name__)
             state.span.record_exception(error)
         state.span.end()
 
@@ -707,15 +686,11 @@ class _Core:
         if serialized:
             kw = serialized.get("kwargs", {}) or {}
             sys_inst = (
-                kw.get("system")
-                or kw.get("system_message")
-                or kw.get("instructions")
+                kw.get("system") or kw.get("system_message") or kw.get("instructions")
             )
         # Fallback: allow application to pass via metadata
         if sys_inst is None and metadata:
-            sys_inst = metadata.get("system") or metadata.get(
-                "system_instructions"
-            )
+            sys_inst = metadata.get("system") or metadata.get("system_instructions")
         if sys_inst is not None and self.enable_content_recording:
             a[Attrs.SYSTEM_INSTRUCTIONS] = (
                 self.redact_messages(_safe_json(sys_inst)) or None
@@ -750,8 +725,7 @@ class _Core:
                                     if role == "ai"
                                     else ("tool" if role == "tool" else "user")
                                 ),
-                                "parts": parts
-                                or [{"type": "text", "content": ""}],
+                                "parts": parts or [{"type": "text", "content": ""}],
                             }
                         )
                 role_parts_threads.append(rp_thread)
@@ -764,9 +738,7 @@ class _Core:
             a[Attrs.INPUT_MESSAGES] = input_msgs
         agent_name = None
         if metadata:
-            agent_name = metadata.get("agent_name") or metadata.get(
-                "agent_type"
-            )
+            agent_name = metadata.get("agent_name") or metadata.get("agent_type")
         if not agent_name and tags:
             for t in tags:
                 if t.startswith("agent:"):
@@ -787,9 +759,7 @@ class _Core:
         role_parts = _generations_to_role_parts(gens)
         out: Dict[str, Any] = {Attrs.RESPONSE_FINISH_REASONS: finish or None}
         output_json = (
-            self.redact_messages(_safe_json(role_parts))
-            if role_parts
-            else None
+            self.redact_messages(_safe_json(role_parts)) if role_parts else None
         )
         if output_json is not None:
             out[Attrs.OUTPUT_MESSAGES] = output_json
@@ -814,9 +784,7 @@ class _Core:
                 out[Attrs.USAGE_OUTPUT_TOKENS] = out_tok
             # Note: gen_ai.usage.total_tokens is not in the current registry
             # spec; avoid emitting it to stay compliant.
-        resp_model = llm_output.get("model") or llm_output.get(
-            "response_model"
-        )
+        resp_model = llm_output.get("model") or llm_output.get("response_model")
         if resp_model:
             out[Attrs.RESPONSE_MODEL] = resp_model
         resp_id = llm_output.get("id") or llm_output.get("response_id")
@@ -824,9 +792,9 @@ class _Core:
             out[Attrs.RESPONSE_ID] = resp_id
         # OpenAI specific optional attributes if present
         if llm_output:
-            service_tier_req = llm_output.get(
-                "service_tier"
-            ) or llm_output.get("request_service_tier")
+            service_tier_req = llm_output.get("service_tier") or llm_output.get(
+                "request_service_tier"
+            )
             if service_tier_req:
                 out[Attrs.OPENAI_REQUEST_SERVICE_TIER] = service_tier_req
             service_tier_resp = llm_output.get("response_service_tier")
@@ -900,12 +868,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         self._created_agents: set[str] = set()
         # Track active invoke_agent spans to avoid duplicates
         # per (parent, agent)
-        self._active_agent_keys: set[Tuple[Optional[UUID], Optional[str]]] = (
-            set()
-        )
-        self._agent_run_to_key: Dict[
-            UUID, Tuple[Optional[UUID], Optional[str]]
-        ] = {}
+        self._active_agent_keys: set[Tuple[Optional[UUID], Optional[str]]] = set()
+        self._agent_run_to_key: Dict[UUID, Tuple[Optional[UUID], Optional[str]]] = {}
 
         # Helper: detect active invoke_agent spans
         def _has_active_invoke_agent() -> bool:
@@ -991,10 +955,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         # parent chat under the root invoke_agent
         try:
             if (
-                (
-                    parent_run_id is None
-                    or parent_run_id not in self._core._runs
-                )
+                (parent_run_id is None or parent_run_id not in self._core._runs)
                 and hasattr(self, "_root_agent_run_id")
                 and self._root_agent_run_id
             ):
@@ -1033,9 +994,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         """Start a chat span from a list of prompts."""
         model = _get_model(serialized)
         params = _extract_params(serialized)
-        messages: List[List[BaseMessage]] = [
-            [HumanMessage(content=p)] for p in prompts
-        ]
+        messages: List[List[BaseMessage]] = [[HumanMessage(content=p)] for p in prompts]
         attrs = self._core.llm_start_attrs(
             serialized=serialized,
             run_id=run_id,
@@ -1067,10 +1026,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         # parent chat under the root invoke_agent
         try:
             if (
-                (
-                    parent_run_id is None
-                    or parent_run_id not in self._core._runs
-                )
+                (parent_run_id is None or parent_run_id not in self._core._runs)
                 and hasattr(self, "_root_agent_run_id")
                 and self._root_agent_run_id
             ):
@@ -1110,9 +1066,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         # Cache tool calls (if any) for synthetic tool spans later
         # when ToolMessage appears
         try:
-            gens: List[List[ChatGeneration]] = getattr(
-                response, "generations", []
-            )
+            gens: List[List[ChatGeneration]] = getattr(response, "generations", [])
             for group in gens:
                 for gen in group:
                     msg = getattr(gen, "message", None)
@@ -1123,17 +1077,9 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                     # {id, function:{name, arguments}, type:'function'}
                     for tc in tool_calls:
                         tc_id = tc.get("id") or tc.get("tool_call_id")
-                        fn = (
-                            (tc.get("function") or {})
-                            if isinstance(tc, dict)
-                            else {}
-                        )
+                        fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
                         name = fn.get("name") if isinstance(fn, dict) else None
-                        args = (
-                            fn.get("arguments")
-                            if isinstance(fn, dict)
-                            else None
-                        )
+                        args = fn.get("arguments") if isinstance(fn, dict) else None
                         # Parse arguments if they look like JSON
                         if isinstance(args, str):
                             try:
@@ -1172,9 +1118,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             state.span.add_event(
                 "gen_ai.token",
                 attributes={
-                    "gen_ai.token.length": (
-                        len(token) if token is not None else 0
-                    ),
+                    "gen_ai.token.length": (len(token) if token is not None else 0),
                     "gen_ai.token.preview": (
                         token[:200] if isinstance(token, str) else ""
                     ),
@@ -1247,11 +1191,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             return
         # Emit create_agent once per agent name (best-effort detection)
         try:
-            if (
-                isinstance(name, str)
-                and name
-                and name not in self._created_agents
-            ):
+            if isinstance(name, str) and name and name not in self._created_agents:
                 self._created_agents.add(name)
                 ca_attrs = {
                     Attrs.PROVIDER_NAME: self._core.provider,
@@ -1262,9 +1202,9 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                 }
                 # If action carries instructions, record as system instructions
                 # (opt-in)
-                sys_inst = getattr(
-                    action, "system_instructions", None
-                ) or getattr(action, "instructions", None)
+                sys_inst = getattr(action, "system_instructions", None) or getattr(
+                    action, "instructions", None
+                )
                 if sys_inst and self._core.enable_content_recording:
                     red = self._core.redact_messages(_safe_json(sys_inst))
                     if red is not None:
@@ -1315,9 +1255,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         **__: Any,
     ) -> Any:
         """Finish the agent span and attach outputs (redacted if enabled)."""
-        output = getattr(finish, "return_values", None) or getattr(
-            finish, "log", None
-        )
+        output = getattr(finish, "return_values", None) or getattr(finish, "log", None)
         if output is not None and not isinstance(output, list):
             out_list = [output]
         else:
@@ -1338,8 +1276,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                     msgs.append(
                         {
                             "role": m.get("role", "assistant"),
-                            "parts": parts
-                            or [{"type": "text", "content": ""}],
+                            "parts": parts or [{"type": "text", "content": ""}],
                             "finish_reason": "stop",
                         }
                     )
@@ -1418,8 +1355,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                         rp_thread.append(
                             {
                                 "role": m.get("role", "user"),
-                                "parts": parts
-                                or [{"type": "text", "content": ""}],
+                                "parts": parts or [{"type": "text", "content": ""}],
                                 "finish_reason": "stop",
                             }
                         )
@@ -1439,9 +1375,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         self._root_agent_run_id = run_id
         self._core.start(
             run_id=run_id,
-            name=(
-                f"invoke_agent {agent_name}" if agent_name else "invoke_agent"
-            ),
+            name=(f"invoke_agent {agent_name}" if agent_name else "invoke_agent"),
             kind=SpanKind.CLIENT,
             operation="invoke_agent",
             parent_run_id=None,
@@ -1486,14 +1420,11 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                     msgs.append(
                         {
                             "role": m.get("role", "assistant"),
-                            "parts": parts
-                            or [{"type": "text", "content": ""}],
+                            "parts": parts or [{"type": "text", "content": ""}],
                             "finish_reason": "stop",
                         }
                     )
-            msg_attr = (
-                self._core.redact_messages(_safe_json(msgs)) if msgs else None
-            )
+            msg_attr = self._core.redact_messages(_safe_json(msgs)) if msgs else None
             if msg_attr is not None:
                 attrs[Attrs.OUTPUT_MESSAGES] = msg_attr
             elif (
@@ -1538,8 +1469,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                 name = meta.get("name") or "tool"
                 syn_run_id = uuid4()
                 attrs_syn = {
-                    Attrs.PROVIDER_NAME: self._current_provider
-                    or self._core.provider,
+                    Attrs.PROVIDER_NAME: self._current_provider or self._core.provider,
                     Attrs.OPERATION_NAME: "execute_tool",
                     Attrs.TOOL_NAME: name,
                     Attrs.METADATA_RUN_ID: str(syn_run_id),
@@ -1552,19 +1482,11 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                     tcid_str = str(tc_id)
                     attrs_syn[Attrs.TOOL_CALL_ID] = tcid_str
                     self._core._executed_tool_call_ids.add(tcid_str)
-                if (
-                    self._core.enable_content_recording
-                    and meta.get("args") is not None
-                ):
+                if self._core.enable_content_recording and meta.get("args") is not None:
                     attrs_syn[Attrs.TOOL_CALL_ARGS] = _safe_json(meta["args"])
                 try:
-                    if (
-                        hasattr(self, "_root_agent_run_id")
-                        and self._root_agent_run_id
-                    ):
-                        attrs_syn[Attrs.CONVERSATION_ID] = str(
-                            self._root_agent_run_id
-                        )
+                    if hasattr(self, "_root_agent_run_id") and self._root_agent_run_id:
+                        attrs_syn[Attrs.CONVERSATION_ID] = str(self._root_agent_run_id)
                 except Exception:
                     pass
                 self._core.start(
@@ -1611,11 +1533,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         **__: Any,
     ) -> Any:
         """Start a tool execution span and record arguments (opt-in)."""
-        name = (
-            (serialized or {}).get("name")
-            or (inputs or {}).get("name")
-            or "tool"
-        )
+        name = (serialized or {}).get("name") or (inputs or {}).get("name") or "tool"
         args_val = inputs if inputs is not None else {"input_str": input_str}
         tool_call_id_raw = None
         if inputs and isinstance(inputs, dict):
@@ -1626,16 +1544,12 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         pending_entry: Optional[Dict[str, Any]] = None
         if tool_call_id_raw is not None:
             try:
-                pending_entry = self._pending_tool_calls.pop(
-                    tool_call_id_raw, None
-                )
+                pending_entry = self._pending_tool_calls.pop(tool_call_id_raw, None)
             except Exception:
                 pending_entry = None
             if pending_entry is None and tool_call_id_str is not None:
                 try:
-                    pending_entry = self._pending_tool_calls.pop(
-                        tool_call_id_str, None
-                    )
+                    pending_entry = self._pending_tool_calls.pop(tool_call_id_str, None)
                 except Exception:
                     pending_entry = None
         # If no direct match, attempt name-based match
@@ -1656,9 +1570,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             ),
             # Respect opt-in content recording for tool arguments
             Attrs.TOOL_CALL_ARGS: (
-                _safe_json(args_val)
-                if self._core.enable_content_recording
-                else None
+                _safe_json(args_val) if self._core.enable_content_recording else None
             ),
             # Attempt optional fields per spec
             Attrs.TOOL_DESCRIPTION: (serialized or {}).get("description"),
@@ -1734,9 +1646,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         """Finish the tool span and record result (opt-in)."""
         # Record tool call result only if content recording enabled (opt-in)
         if self._core.enable_content_recording:
-            self._core.set(
-                run_id, {Attrs.TOOL_CALL_RESULT: _safe_json(output)}
-            )
+            self._core.set(run_id, {Attrs.TOOL_CALL_RESULT: _safe_json(output)})
         self._core.end(run_id, None)
 
     def on_tool_error(
@@ -1826,14 +1736,10 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
     ) -> Any:
         """Start a parser span and optionally record inputs/config."""
         name = (
-            (serialized or {}).get("id")
-            or (serialized or {}).get("name")
-            or "parser"
+            (serialized or {}).get("id") or (serialized or {}).get("name") or "parser"
         )
         kw = (serialized or {}).get("kwargs", {}) or {}
-        ptype = (
-            (serialized or {}).get("type") or kw.get("_type") or kw.get("type")
-        )
+        ptype = (serialized or {}).get("type") or kw.get("_type") or kw.get("type")
         attrs: Dict[str, Any] = {
             Attrs.PROVIDER_NAME: self._core.provider,
             Attrs.OPERATION_NAME: "parse",
@@ -1922,9 +1828,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             or "transform"
         )
         kw = (serialized or {}).get("kwargs", {}) or {}
-        ttype = (
-            (serialized or {}).get("type") or kw.get("_type") or kw.get("type")
-        )
+        ttype = (serialized or {}).get("type") or kw.get("_type") or kw.get("type")
         attrs: Dict[str, Any] = {
             Attrs.PROVIDER_NAME: self._core.provider,
             Attrs.OPERATION_NAME: "transform",
@@ -2157,9 +2061,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         """Start an embeddings span and optionally record inputs."""
         model = _get_model(serialized)
         kw = (serialized or {}).get("kwargs", {}) or {}
-        encoding_formats = kw.get("encoding_format") or kw.get(
-            "encoding_formats"
-        )
+        encoding_formats = kw.get("encoding_format") or kw.get("encoding_formats")
         if isinstance(encoding_formats, str):
             encoding_formats = [encoding_formats]
         dims = kw.get("dimensions") or kw.get("embedding_dimensions")
@@ -2272,20 +2174,14 @@ def _generations_to_role_parts(
                         tc_id = tc.get("id")
                         func = tc.get("function") or {}
                         name = func.get("name") or tc.get("name")
-                        args = (
-                            func.get("arguments")
-                            if isinstance(func, dict)
-                            else None
-                        )
+                        args = func.get("arguments") if isinstance(func, dict) else None
                         parts.append(
                             {
                                 "type": "tool_call",
                                 "id": tc_id,
                                 "name": name,
                                 "arguments": _try_parse_json(
-                                    args
-                                    if args is not None
-                                    else tc.get("arguments")
+                                    args if args is not None else tc.get("arguments")
                                 ),
                             }
                         )
@@ -2298,9 +2194,7 @@ def _generations_to_role_parts(
                         parts.append(
                             {
                                 "type": "tool_call",
-                                "id": (
-                                    str(tc_id) if tc_id is not None else None
-                                ),
+                                "id": (str(tc_id) if tc_id is not None else None),
                                 "name": name,
                                 "arguments": _try_parse_json(args),
                             }

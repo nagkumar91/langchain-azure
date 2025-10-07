@@ -1,10 +1,15 @@
 import json
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 from uuid import uuid4
 
 import pytest
-from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    ToolMessage,
+)
 from langchain_core.outputs import ChatGeneration, LLMResult
 
 import langchain_azure_ai.callbacks.tracers.inference_tracing as tracing
@@ -35,9 +40,7 @@ class MockSpan:
     def set_attribute(self, key: str, value: Any) -> None:
         self.attributes[key] = value
 
-    def add_event(
-        self, name: str, attributes: Optional[Dict[str, Any]] = None
-    ) -> None:
+    def add_event(self, name: str, attributes: Optional[Dict[str, Any]] = None) -> None:
         self.events.append((name, attributes or {}))
 
     def set_status(self, status: Any) -> None:
@@ -59,9 +62,7 @@ class MockTracer:
     def __init__(self) -> None:
         self.spans = []
 
-    def start_span(
-        self, name: str, kind: Any = None, context: Any = None
-    ) -> MockSpan:
+    def start_span(self, name: str, kind: Any = None, context: Any = None) -> MockSpan:
         span = MockSpan(name)
         self.spans.append(span)
         return span
@@ -125,9 +126,7 @@ def test_llm_start_attributes_content_recording_off(
 
 
 def test_redaction_on_chat_and_end(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(
-        "AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED", "true"
-    )
+    monkeypatch.setenv("AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED", "true")
     t = tracing.AzureAIOpenTelemetryTracer(redact=True)
     run_id = uuid4()
     messages = [[HumanMessage(content="secret"), AIMessage(content="reply")]]
@@ -193,22 +192,16 @@ def test_streaming_token_event(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_synthetic_execute_tool_under_chat_parent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(
-        "AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED", "true"
-    )
+    monkeypatch.setenv("AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED", "true")
     t = tracing.AzureAIOpenTelemetryTracer()
     # Start root agent via chain_start
     root = uuid4()
-    t.on_chain_start(
-        {}, {"messages": [{"role": "user", "content": "hi"}]}, run_id=root
-    )
+    t.on_chain_start({}, {"messages": [{"role": "user", "content": "hi"}]}, run_id=root)
     # Start a chat span
     chat_run = uuid4()
     serialized = {"kwargs": {"model": "m"}}
-    msgs = [[HumanMessage(content="prompt")]]
-    t.on_chat_model_start(
-        serialized, msgs, run_id=chat_run, parent_run_id=root
-    )
+    msgs = cast(List[List[BaseMessage]], [[HumanMessage(content="prompt")]])
+    t.on_chat_model_start(serialized, msgs, run_id=chat_run, parent_run_id=root)
     # End with tool_calls requested by assistant
     # Provide tool_calls via additional_kwargs to match LC parsing
     tool_calls = [
@@ -217,17 +210,13 @@ def test_synthetic_execute_tool_under_chat_parent(
             "function": {"name": "get_current_date", "arguments": "{}"},
         }
     ]
-    ai_msg = AIMessage(
-        content="", additional_kwargs={"tool_calls": tool_calls}
-    )
+    ai_msg = AIMessage(content="", additional_kwargs={"tool_calls": tool_calls})
     gen = ChatGeneration(
         message=ai_msg, generation_info={"finish_reason": "tool_calls"}
     )
     result = LLMResult(
         generations=[[gen]],
-        llm_output={
-            "token_usage": {"prompt_tokens": 1, "completion_tokens": 1}
-        },
+        llm_output={"token_usage": {"prompt_tokens": 1, "completion_tokens": 1}},
     )
     t.on_llm_end(result, run_id=chat_run, parent_run_id=root)
     # Synthetic execute_tool span should be emitted when chain completes
@@ -239,9 +228,7 @@ def test_synthetic_execute_tool_under_chat_parent(
     # Fallback synthetic spans default to "tool" when no explicit name
     assert attrs.get(tracing.Attrs.TOOL_NAME) == "tool"
     # Conversation id should be present on chat and tools
-    chat_span = [
-        s for s in t._core._tracer.spans if s.name.startswith("chat")
-    ][-1]
+    chat_span = [s for s in t._core._tracer.spans if s.name.startswith("chat")][-1]
     assert chat_span.attributes.get(tracing.Attrs.CONVERSATION_ID) == str(root)
     assert attrs.get(tracing.Attrs.CONVERSATION_ID) == str(root)
 
@@ -279,9 +266,7 @@ def test_tool_start_name_and_conversation_id(
 ) -> None:
     t = tracing.AzureAIOpenTelemetryTracer(enable_content_recording=True)
     root = uuid4()
-    t.on_chain_start(
-        {}, {"messages": [{"role": "user", "content": "hi"}]}, run_id=root
-    )
+    t.on_chain_start({}, {"messages": [{"role": "user", "content": "hi"}]}, run_id=root)
     # Start a tool with serialized name and inputs id
     run_id = uuid4()
     parent_run = uuid4()  # simulate parent chat id context
@@ -312,24 +297,18 @@ def test_tool_deduplicates_synthetic_entries(
 ) -> None:
     t = tracing.AzureAIOpenTelemetryTracer(enable_content_recording=True)
     root = uuid4()
-    t.on_chain_start(
-        {}, {"messages": [{"role": "user", "content": "hi"}]}, run_id=root
-    )
+    t.on_chain_start({}, {"messages": [{"role": "user", "content": "hi"}]}, run_id=root)
     chat_run = uuid4()
     serialized = {"kwargs": {"model": "m"}}
-    msgs = [[HumanMessage(content="prompt")]]
-    t.on_chat_model_start(
-        serialized, msgs, run_id=chat_run, parent_run_id=root
-    )
+    msgs = cast(List[List[BaseMessage]], [[HumanMessage(content="prompt")]])
+    t.on_chat_model_start(serialized, msgs, run_id=chat_run, parent_run_id=root)
     tool_calls = [
         {
             "id": "call-1",
             "function": {"name": "get_weather", "arguments": '{"city": "SF"}'},
         }
     ]
-    ai_msg = AIMessage(
-        content="", additional_kwargs={"tool_calls": tool_calls}
-    )
+    ai_msg = AIMessage(content="", additional_kwargs={"tool_calls": tool_calls})
     gen = ChatGeneration(message=ai_msg)
     result = LLMResult(generations=[[gen]], llm_output={})
     t.on_llm_end(result, run_id=chat_run, parent_run_id=root)
@@ -368,9 +347,7 @@ def test_invoke_agent_records_tool_definitions(
         {"messages": [{"role": "user", "content": "hi"}], "tools": tools},
         run_id=root,
     )
-    span = [
-        s for s in t._core._tracer.spans if s.name.startswith("invoke_agent")
-    ][-1]
+    span = [s for s in t._core._tracer.spans if s.name.startswith("invoke_agent")][-1]
     defs = span.attributes.get(tracing.Attrs.TOOL_DEFINITIONS)
     assert defs is not None
     assert "get_weather" in defs and "search_docs" in defs
@@ -389,9 +366,7 @@ def test_finish_reasons_normalized() -> None:
     t.on_llm_end(result, run_id=chat_run)
     span = [s for s in t._core._tracer.spans if s.name.startswith("chat")][-1]
     # Aggregated finish reasons should be normalized to singular
-    assert span.attributes.get(tracing.Attrs.RESPONSE_FINISH_REASONS) == [
-        "tool_call"
-    ]
+    assert span.attributes.get(tracing.Attrs.RESPONSE_FINISH_REASONS) == ["tool_call"]
 
 
 def test_chat_parenting_under_root_agent(
@@ -400,16 +375,12 @@ def test_chat_parenting_under_root_agent(
     t = tracing.AzureAIOpenTelemetryTracer()
     root = uuid4()
     # Start root agent
-    t.on_chain_start(
-        {}, {"messages": [{"role": "user", "content": "hi"}]}, run_id=root
-    )
+    t.on_chain_start({}, {"messages": [{"role": "user", "content": "hi"}]}, run_id=root)
     # Start chat without specifying parent; should parent under root agent
     chat_run = uuid4()
     t.on_llm_start({"kwargs": {"model": "m"}}, ["hello"], run_id=chat_run)
     span = get_last_span_for(t)
-    assert span.attributes.get(tracing.Attrs.METADATA_PARENT_RUN_ID) == str(
-        root
-    )
+    assert span.attributes.get(tracing.Attrs.METADATA_PARENT_RUN_ID) == str(root)
 
 
 def test_llm_error_sets_status_and_exception(
@@ -568,9 +539,7 @@ def test_transform_start_end(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_pending_tool_call_cached_for_chain_end(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv(
-        "AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED", "true"
-    )
+    monkeypatch.setenv("AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED", "true")
     t = tracing.AzureAIOpenTelemetryTracer(enable_content_recording=True)
     run_id = uuid4()
     serialized = {"kwargs": {"model": "m"}}
