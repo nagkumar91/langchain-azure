@@ -1188,7 +1188,6 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                 or _nm.startswith("tool")
             ):
                 return
-            return
         # Emit create_agent once per agent name (best-effort detection)
         try:
             if isinstance(name, str) and name and name not in self._created_agents:
