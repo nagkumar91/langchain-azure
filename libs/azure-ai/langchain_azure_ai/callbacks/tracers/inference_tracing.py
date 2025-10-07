@@ -123,7 +123,7 @@ def _safe_json(obj: Any) -> str:
 
 def _try_parse_json(s: Any) -> Any:
     """Best-effort parse a JSON string, otherwise return the original value."""
-    if isinstance(s, str):
+    if isinstance(s, (str, bytes)):
         try:
             return json.loads(s)
         except Exception:
