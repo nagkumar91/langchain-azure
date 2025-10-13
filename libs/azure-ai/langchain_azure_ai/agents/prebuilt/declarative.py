@@ -21,6 +21,9 @@ from azure.ai.agents.models import (
     FunctionTool,
     FunctionToolDefinition,
     ListSortOrder,
+    MessageImageUrlParam,
+    MessageInputContentBlock,
+    MessageInputImageUrlBlock,
     MessageInputTextBlock,
     RequiredFunctionToolCall,
     StructuredToolOutput,
@@ -36,6 +39,7 @@ from azure.ai.projects import AIProjectClient
 from azure.core.exceptions import HttpResponseError
 from langchain_core.messages import (
     AIMessage,
+    BaseMessage,
     HumanMessage,
     ToolCall,
     ToolMessage,
@@ -46,51 +50,16 @@ from langchain_core.utils.function_calling import (
     convert_to_openai_function,
 )
 from langgraph._internal._runnable import RunnableCallable
-from langgraph.graph import MessagesState
+from langgraph.prebuilt.chat_agent_executor import StateSchema
 from langgraph.prebuilt.tool_node import ToolNode
 from langgraph.store.base import BaseStore
 
-from langchain_azure_ai.agents.prebuilt.tools import AgentServiceBaseTool
+from langchain_azure_ai.agents.prebuilt.tools import (
+    AgentServiceBaseTool,
+    _OpenAIFunctionTool,
+)
 
 logger = logging.getLogger(__package__)
-
-
-class OpenAIFunctionTool(Tool[FunctionToolDefinition]):
-    """A tool that wraps OpenAI function definitions."""
-
-    def __init__(self, definitions: List[FunctionToolDefinition]):
-        """Initialize the OpenAIFunctionTool with function definitions.
-
-        Args:
-        definitions: A list of function definitions to be used by the tool.
-        """
-        self._definitions = definitions
-
-    @property
-    def definitions(self) -> List[FunctionToolDefinition]:
-        """Get the function definitions.
-
-        Returns:
-            A list of function definitions.
-        """
-        return self._definitions
-
-    @property
-    def resources(self) -> ToolResources:
-        """Get the tool resources for the agent.
-
-        Returns:
-            The tool resources.
-        """
-        return ToolResources()
-
-    def execute(self, tool_call: Any) -> Any:
-        """Execute the tool with the provided tool call.
-
-        :param Any tool_call: The tool call to execute.
-        :return: The output of the tool operations.
-        """
-        pass
 
 
 def _required_tool_calls_to_message(
@@ -193,7 +162,7 @@ def _get_tool_definitions(
                     raise ValueError(
                         "Passing raw Tool definitions from package azure-ai-agents "
                         "is not supported. Wrap the tool in "
-                        "`langchain_azure_ai.tools.agent_service.AgentServiceBaseTool` "
+                        "langchain_azure_ai.agents.prebuilt.tools.AgentServiceBaseTool"
                         " and pass `tool=<your_tool>`."
                     )
                 else:
@@ -211,9 +180,99 @@ def _get_tool_definitions(
     if len(function_tools) > 0:
         toolset.add(FunctionTool(function_tools))
     if len(openai_tools) > 0:
-        toolset.add(OpenAIFunctionTool(openai_tools))
+        toolset.add(_OpenAIFunctionTool(openai_tools))
 
     return toolset.definitions
+
+
+def _get_thread_input_from_state(state: StateSchema) -> BaseMessage:
+    """Extract the latest message from the state.
+
+    Args:
+        state: The current state, expected to have a 'messages' key.
+
+    Returns:
+        The latest message from the state's messages.
+    """
+    messages = (
+        state.get("messages", None)
+        if isinstance(state, dict)
+        else getattr(state, "messages", None)
+    )
+    if messages is None:
+        raise ValueError(
+            f"Expected input to call_model to have 'messages' key, but got {state}"
+        )
+
+    return messages[-1]
+
+
+def _content_from_human_message(
+    message: HumanMessage,
+) -> Union[str, List[Union[MessageInputContentBlock]]]:
+    """Convert a HumanMessage content to a list of blocks.
+
+    Args:
+        message: The HumanMessage to convert.
+
+    Returns:
+        A list of MessageInputTextBlock or MessageInputImageFileBlock.
+    """
+    content: List[Union[MessageInputContentBlock]] = []
+    if isinstance(message.content, str):
+        return message.content
+    elif isinstance(message.content, list):
+        for block in message.content:
+            if isinstance(block, str):
+                content.append(MessageInputTextBlock(text=block))
+            elif isinstance(block, dict):
+                block_type = block.get("type")
+                if block_type == "text":
+                    content.append(MessageInputTextBlock(text=block.get("text", "")))
+                elif block_type == "image_url":
+                    content.append(
+                        MessageInputImageUrlBlock(
+                            image_url=MessageImageUrlParam(
+                                url=block["image_url"]["url"], detail="high"
+                            )
+                        ),
+                    )
+                elif block_type == "image":
+                    if block.get("source_type") == "base64":
+                        content.append(
+                            MessageInputImageUrlBlock(
+                                image_url=MessageImageUrlParam(
+                                    url=f"data:{block['mime_type']};base64,{block['data']}",
+                                    detail="high",
+                                )
+                            ),
+                        )
+                    elif block_type == "url":
+                        content.append(
+                            MessageInputImageUrlBlock(
+                                image_url=MessageImageUrlParam(
+                                    url=block["url"], detail="high"
+                                )
+                            ),
+                        )
+                    else:
+                        raise ValueError(
+                            "Only 'base64' and 'url' source types are supported for "
+                            "image blocks."
+                        )
+                else:
+                    raise ValueError(
+                        f"Unsupported block type {block_type} in HumanMessage "
+                        "content. Only 'image' type is supported as dict."
+                    )
+            else:
+                raise ValueError("Unexpected block type in HumanMessage content.")
+    else:
+        raise ValueError(
+            "HumanMessage content must be either a string or a list of strings and/or"
+            " dicts."
+        )
+    return content
 
 
 class DeclarativeChatAgentNode(RunnableCallable):
@@ -226,25 +285,24 @@ class DeclarativeChatAgentNode(RunnableCallable):
     instances of this node.
 
     Example:
-        .. code-block:: python
-            from langchain_azure_ai.agents import AgentServiceFactory
-            from langchain_azure_ai.tools.agent_service import AgentServiceBaseTool
-            from azure.identity import DefaultAzureCredential
-            from langchain_core.messages import HumanMessage
+    ```python
+    from azure.identity import DefaultAzureCredential
+    from langchain_azure_ai.agents import AgentServiceFactory
 
-            factory = AgentServiceFactory(
-                project_endpoint=(
-                    "https://resource.services.ai.azure.com/api/projects/demo-project",
-                ),
-                credential=DefaultAzureCredential()
-            )
+    factory = AgentServiceFactory(
+        project_endpoint=(
+            "https://resource.services.ai.azure.com/api/projects/demo-project",
+        ),
+        credential=DefaultAzureCredential()
+    )
 
-            coder = factory.create_declarative_chat_node(
-                name="code-interpreter-agent",
-                model="gpt-4.1",
-                instructions="You are a helpful assistant that can run Python code.",
-                tools=[AgentServiceBaseTool(tool=CodeInterpreterTool())],
-            )
+    coder = factory.create_declarative_chat_node(
+        name="code-interpreter-agent",
+        model="gpt-4.1",
+        instructions="You are a helpful assistant that can run Python code.",
+        tools=[func1, func2],
+    )
+    ```
     """
 
     name: str = "DeclarativeChatAgent"
@@ -268,6 +326,9 @@ class DeclarativeChatAgentNode(RunnableCallable):
     _pending_run_id: Optional[str] = None
     """The ID of the pending run, if any."""
 
+    _polling_interval: int = 1
+    """The interval (in seconds) to poll for updates on the agent's status."""
+
     def __init__(
         self,
         client: AIProjectClient,
@@ -286,6 +347,7 @@ class DeclarativeChatAgentNode(RunnableCallable):
         tool_resources: Optional[Any] = None,
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
+        polling_interval: int = 1,
         tags: Optional[Sequence[str]] = None,
         trace: bool = True,
     ) -> None:
@@ -306,11 +368,14 @@ class DeclarativeChatAgentNode(RunnableCallable):
             temperature: The temperature to use for the agent.
             top_p: The top_p value to use for the agent.
             tags: Optional tags to associate with the agent.
+            polling_interval: The interval (in seconds) to poll for updates on the
+                agent's status. Defaults to 1 second.
             trace: Whether to enable tracing for the node. Defaults to True.
         """
         super().__init__(self._func, self._afunc, name=name, tags=tags, trace=trace)
 
         self._client = client
+        self._polling_interval = polling_interval
 
         if agent_id is not None:
             try:
@@ -417,11 +482,11 @@ class DeclarativeChatAgentNode(RunnableCallable):
 
     def _func(
         self,
-        input: MessagesState,
+        state: StateSchema,
         config: RunnableConfig,
         *,
         store: Optional[BaseStore],
-    ) -> Any:
+    ) -> StateSchema:
         if self._agent is None or self._agent_id is None:
             raise RuntimeError(
                 "The agent has not been initialized properly "
@@ -436,11 +501,7 @@ class DeclarativeChatAgentNode(RunnableCallable):
 
         assert self._thread_id is not None
 
-        state = input
-        if len(state["messages"]) > 0:
-            message = state["messages"][-1]
-        else:
-            raise ValueError("Input state must contain at least one message.")
+        message = _get_thread_input_from_state(state)
 
         if isinstance(message, ToolMessage):
             logger.info(f"Submitting tool message with ID {message.id}")
@@ -469,21 +530,11 @@ class DeclarativeChatAgentNode(RunnableCallable):
                 )
         elif isinstance(message, HumanMessage):
             logger.info(f"Submitting human message {message.content}")
-            if isinstance(message.content, str):
-                self._client.agents.messages.create(
-                    thread_id=self._thread_id, role="user", content=message.content
-                )
-            elif isinstance(message.content, dict):
-                raise RuntimeError(
-                    "Message content as dict is not supported yet. "
-                    "Please submit as string."
-                )
-            elif isinstance(message.content, list):
-                self._client.agents.messages.create(
-                    thread_id=self._thread_id,
-                    role="user",
-                    content=[MessageInputTextBlock(block) for block in message.content],  # type: ignore[arg-type]
-                )
+            self._client.agents.messages.create(
+                thread_id=self._thread_id,
+                role="user",
+                content=_content_from_human_message(message),  # type: ignore[arg-type]
+            )
         else:
             raise RuntimeError(f"Unsupported message type: {type(message)}")
 
@@ -500,8 +551,10 @@ class DeclarativeChatAgentNode(RunnableCallable):
             )
 
         while run.status in ["queued", "in_progress"]:
-            time.sleep(1)
+            time.sleep(self._polling_interval)
             run = self._client.agents.runs.get(thread_id=self._thread_id, run_id=run.id)
+
+        responses: List[BaseMessage] = []
 
         if run.status == "requires_action" and isinstance(
             run.required_action, SubmitToolOutputsAction
@@ -509,7 +562,7 @@ class DeclarativeChatAgentNode(RunnableCallable):
             tool_calls = run.required_action.submit_tool_outputs.tool_calls
             for tool_call in tool_calls:
                 if isinstance(tool_call, RequiredFunctionToolCall):
-                    state["messages"].append(_required_tool_calls_to_message(tool_call))
+                    responses.append(_required_tool_calls_to_message(tool_call))
                 else:
                     raise ValueError(
                         f"Unsupported tool call type: {type(tool_call)} in run "
@@ -526,21 +579,24 @@ class DeclarativeChatAgentNode(RunnableCallable):
             )
             for msg in response:
                 new_message = self._to_langchain_message(msg)
+                new_message.name = self._agent_name
                 if new_message:
-                    state["messages"].append(new_message)
+                    responses.append(new_message)
 
             self._pending_run_id = None
 
+        return {"messages": responses}  # type: ignore[return-value]
+
     async def _afunc(
         self,
-        input: MessagesState,
+        state: StateSchema,
         config: RunnableConfig,
         *,
         store: Optional[BaseStore],
-    ) -> Any:
+    ) -> StateSchema:
         import asyncio
 
-        def _sync_func() -> Any:
-            return self._func(input, config, store=store)
+        def _sync_func() -> StateSchema:
+            return self._func(state, config, store=store)  # type: ignore[return-value]
 
         return await asyncio.to_thread(_sync_func)

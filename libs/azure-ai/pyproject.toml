@@ -1,6 +1,6 @@
 [project]
 name = "langchain-azure-ai"
-version = "0.1.7"
+version = "0.1.8"
 description = "An integration package to support Azure AI Foundry capabilities for model inference in LangChain."
 license = { file = "LICENSE" }
 readme = "README.md"
@@ -25,7 +25,10 @@ dependencies = [
 [project.optional-dependencies]
 opentelemetry = [
   "azure-monitor-opentelemetry~=1.6",
-  "opentelemetry-instrumentation-threading>=0.49b2,<0.50",
+  "opentelemetry-api>=1.37",
+  "opentelemetry-instrumentation>=0.58b0",
+  "opentelemetry-instrumentation-threading>=0.58b0",
+  "opentelemetry-semantic-conventions>=0.58b0",
   "opentelemetry-semantic-conventions-ai~=0.4.2",
 ]
 tools = [
@@ -92,7 +95,10 @@ optional = true
 
 [tool.poetry.group.test.dependencies]
 azure-monitor-opentelemetry = "~=1.6"
-opentelemetry-instrumentation-threading = ">=0.49b2,<0.50"
+opentelemetry-api = ">=1.37"
+opentelemetry-instrumentation = ">=0.58b0"
+opentelemetry-instrumentation-threading = ">=0.58b0"
+opentelemetry-semantic-conventions = ">=0.58b0"
 opentelemetry-semantic-conventions-ai = "~=0.4.2"
 langchain-core = { git = "https://github.com/langchain-ai/langchain.git", subdirectory = "libs/core" }
 pydantic = "~=2.9"
@@ -148,7 +154,10 @@ lint = [
 ]
 test = [
   "azure-monitor-opentelemetry~=1.6",
-  "opentelemetry-instrumentation-threading>=0.49b2,<0.50",
+  "opentelemetry-api>=1.37",
+  "opentelemetry-instrumentation>=0.58b0",
+  "opentelemetry-instrumentation-threading>=0.58b0",
+  "opentelemetry-semantic-conventions>=0.58b0",
   "opentelemetry-semantic-conventions-ai~=0.4.2",
   "langchain-core",
   "pydantic~=2.9",
