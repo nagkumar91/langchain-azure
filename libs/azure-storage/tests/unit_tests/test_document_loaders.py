@@ -13,6 +13,7 @@ from azure.storage.blob.aio import (
 )
 from langchain_core.documents.base import Document
 
+from langchain_azure_storage import __version__
 from langchain_azure_storage.document_loaders import AzureBlobStorageLoader
 from tests.utils import (
     CustomCSVLoader,
@@ -342,3 +343,27 @@ async def test_async_custom_loader_factory_with_configurations(
     assert [
         doc async for doc in loader.alazy_load()
     ] == expected_custom_csv_documents_with_columns
+
+
+def test_user_agent(
+    create_azure_blob_storage_loader: Callable[..., AzureBlobStorageLoader],
+    mock_container_client: Tuple[MagicMock, MagicMock],
+) -> None:
+    mock_container_client_cls, _ = mock_container_client
+    user_agent = f"azpartner-langchain/{__version__}"
+    loader = create_azure_blob_storage_loader(blob_names="text_file.txt")
+    list(loader.lazy_load())
+    client_kwargs = mock_container_client_cls.call_args[1]
+    assert client_kwargs["user_agent"] == user_agent
+
+
+async def test_async_user_agent(
+    create_azure_blob_storage_loader: Callable[..., AzureBlobStorageLoader],
+    async_mock_container_client: Tuple[AsyncMock, AsyncMock],
+) -> None:
+    async_mock_container_client_cls, _ = async_mock_container_client
+    user_agent = f"azpartner-langchain/{__version__}"
+    loader = create_azure_blob_storage_loader(blob_names="text_file.txt")
+    [doc async for doc in loader.alazy_load()]
+    client_kwargs = async_mock_container_client_cls.call_args[1]
+    assert client_kwargs["user_agent"] == user_agent
