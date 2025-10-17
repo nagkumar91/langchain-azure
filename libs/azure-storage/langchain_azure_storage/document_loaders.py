@@ -17,7 +17,7 @@ import azure.core.credentials
 import azure.core.credentials_async
 import azure.identity
 import azure.identity.aio
-from azure.storage.blob import BlobClient, ContainerClient
+from azure.storage.blob import BlobClient, BlobProperties, ContainerClient
 from azure.storage.blob.aio import BlobClient as AsyncBlobClient
 from azure.storage.blob.aio import ContainerClient as AsyncContainerClient
 from langchain_core.document_loaders import BaseLoader
@@ -256,7 +256,11 @@ class AzureBlobStorageLoader(BaseLoader):
         if self._blob_names is not None:
             yield from self._blob_names
         else:
-            yield from container_client.list_blob_names(name_starts_with=self._prefix)
+            for blob in container_client.list_blobs(
+                name_starts_with=self._prefix, include="metadata"
+            ):
+                if not self._is_adls_directory(blob):
+                    yield blob.name
 
     async def _ayield_blob_names(
         self, async_container_client: AsyncContainerClient
@@ -265,14 +269,22 @@ class AzureBlobStorageLoader(BaseLoader):
             for blob_name in self._blob_names:
                 yield blob_name
         else:
-            async for blob_name in async_container_client.list_blob_names(
-                name_starts_with=self._prefix
+            async for blob in async_container_client.list_blobs(
+                name_starts_with=self._prefix, include="metadata"
             ):
-                yield blob_name
+                if not self._is_adls_directory(blob):
+                    yield blob.name
 
     def _get_default_document(
         self, blob_content: bytes, blob_client: Union[BlobClient, AsyncBlobClient]
     ) -> Document:
         return Document(
             blob_content.decode("utf-8"), metadata={"source": blob_client.url}
+        )
+
+    def _is_adls_directory(self, blob: BlobProperties) -> bool:
+        return (
+            blob.size == 0
+            and blob.metadata is not None
+            and blob.metadata.get("hdi_isfolder") == "true"
         )
