@@ -6,3 +6,4 @@ __pycache__
 .env
 .venv*
 libs/azure-ai/langchain_azure_ai/callbacks/tracers/*.log
+!libs/azure-ai/langchain_azure_ai/callbacks/tracers/.env
