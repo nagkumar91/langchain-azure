@@ -12,7 +12,9 @@ from pydantic import PrivateAttr, model_validator
 from langchain_azure_ai._resources import AIServicesService
 
 try:
-    from azure.ai.textanalytics import TextAnalyticsClient
+    from azure.ai.textanalytics import (
+        TextAnalyticsClient,  # type: ignore[import-untyped]
+    )
     from azure.core.credentials import AzureKeyCredential
 except ImportError:
     raise ImportError(

@@ -16,8 +16,12 @@ from pydantic import BaseModel, PrivateAttr, SkipValidation, model_validator
 from langchain_azure_ai._resources import AIServicesService
 
 try:
-    from azure.ai.vision.imageanalysis import ImageAnalysisClient
-    from azure.ai.vision.imageanalysis.models import VisualFeatures
+    from azure.ai.vision.imageanalysis import (
+        ImageAnalysisClient,  # type: ignore[import-untyped]
+    )
+    from azure.ai.vision.imageanalysis.models import (
+        VisualFeatures,  # type: ignore[import-untyped]
+    )
 except ImportError:
     raise ImportError(
         "To use Azure AI Image Analysis tool, please install the"

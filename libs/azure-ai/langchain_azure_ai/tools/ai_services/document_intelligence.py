@@ -12,8 +12,12 @@ from pydantic import BaseModel, PrivateAttr, SkipValidation, model_validator
 from langchain_azure_ai._resources import AIServicesService
 
 try:
-    from azure.ai.documentintelligence import DocumentIntelligenceClient
-    from azure.ai.documentintelligence.models import AnalyzeDocumentRequest
+    from azure.ai.documentintelligence import (
+        DocumentIntelligenceClient,  # type: ignore[import-untyped]
+    )
+    from azure.ai.documentintelligence.models import (
+        AnalyzeDocumentRequest,  # type: ignore[import-untyped]
+    )
     from azure.core.credentials import AzureKeyCredential
 except ImportError:
     raise ImportError(

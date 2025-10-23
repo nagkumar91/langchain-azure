@@ -64,6 +64,16 @@ module = [
 ]
 ignore_missing_imports = true
 
+[[tool.mypy.overrides]]
+module = [
+  "azure.ai.textanalytics",
+  "azure.ai.vision.imageanalysis",
+  "azure.ai.vision.imageanalysis.models",
+  "azure.ai.documentintelligence",
+  "azure.ai.documentintelligence.models",
+]
+ignore_missing_imports = true
+
 [tool.poetry.group.codespell]
 optional = true
 

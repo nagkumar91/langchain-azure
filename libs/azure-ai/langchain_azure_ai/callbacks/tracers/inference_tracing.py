@@ -29,7 +29,7 @@ import logging
 import os
 from dataclasses import asdict, dataclass, field, is_dataclass
 from threading import Lock
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Union, cast
 from uuid import UUID
 
 from langchain_core.agents import AgentAction, AgentFinish
@@ -161,7 +161,9 @@ def _coerce_content_to_text(content: Any) -> Optional[str]:
     return str(content)
 
 
-def _extract_tool_calls(message: Union[BaseMessage, dict[str, Any]]) -> List[dict[str, Any]]:
+def _extract_tool_calls(
+    message: Union[BaseMessage, dict[str, Any]],
+) -> List[dict[str, Any]]:
     if isinstance(message, AIMessage) and getattr(message, "tool_calls", None):
         tool_calls = getattr(message, "tool_calls") or []
         if isinstance(tool_calls, list):
@@ -174,7 +176,7 @@ def _extract_tool_calls(message: Union[BaseMessage, dict[str, Any]]) -> List[dic
 
 
 def _tool_call_id_from_message(
-    message: Union[BaseMessage, dict[str, Any]]
+    message: Union[BaseMessage, dict[str, Any]],
 ) -> Optional[str]:
     if isinstance(message, ToolMessage):
         if getattr(message, "tool_call_id", None):
@@ -316,7 +318,7 @@ def _scrub_value(value: Any, record_content: bool) -> Any:
         return {k: _scrub_value(v, record_content) for k, v in value.items()}
     if isinstance(value, (list, tuple, set)):
         return [_scrub_value(v, record_content) for v in value]
-    if is_dataclass(value):
+    if is_dataclass(value) and not isinstance(value, type):
         try:
             return asdict(value)
         except Exception:  # pragma: no cover
@@ -355,9 +357,9 @@ def _format_documents(
 ) -> Optional[str]:
     if not documents:
         return None
-    serialised = []
+    serialised: List[Dict[str, Any]] = []
     for doc in documents:
-        entry = {"metadata": dict(doc.metadata)}
+        entry: Dict[str, Any] = {"metadata": dict(doc.metadata)}
         if record_content:
             entry["content"] = doc.page_content
         serialised.append(entry)
@@ -494,6 +496,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         enable_content_recording: bool = True,
         name: str = "AzureAIOpenTelemetryTracer",
     ) -> None:
+        """Initialize tracer state and configure Azure Monitor if needed."""
         super().__init__()
         self._name = name
         self._content_recording = enable_content_recording
@@ -568,6 +571,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         metadata: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Any:
+        """Handle start of a chain/agent invocation."""
         agent_name = _first_non_empty(
             kwargs.get("name"),
             (metadata or {}).get("langgraph_node"),
@@ -627,6 +631,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
+        """Handle completion of a chain/agent invocation."""
         run_key = str(run_id)
         if run_key in self._ignored_runs:
             self._ignored_runs.remove(run_key)
@@ -673,6 +678,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
+        """Handle errors raised during chain execution."""
         run_key = str(run_id)
         if run_key in self._ignored_runs:
             self._ignored_runs.remove(run_key)
@@ -695,6 +701,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         metadata: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Any:
+        """Record chat model start metadata."""
         self._handle_model_start(
             serialized=serialized,
             inputs=messages,
@@ -716,6 +723,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         metadata: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Any:
+        """Record LLM start metadata."""
         self._handle_model_start(
             serialized=serialized,
             inputs=prompts,
@@ -734,11 +742,14 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
+        """Record LLM response attributes and finish the span."""
         record = self._spans.get(str(run_id))
         if not record:
             return
 
-        generations: Sequence[Sequence[ChatGeneration]] = response.generations
+        generations = cast(
+            Sequence[Sequence[ChatGeneration]], response.generations or []
+        )
         chat_generations: List[ChatGeneration] = []
         if generations:
             chat_generations = [gen for thread in generations for gen in thread]
@@ -818,6 +829,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
+        """Mark the LLM span as errored."""
         self._end_span(
             run_id,
             status=Status(StatusCode.ERROR, str(error)),
@@ -835,6 +847,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         inputs: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Any:
+        """Create a span representing tool execution."""
         resolved_parent = self._resolve_parent_id(parent_run_id)
         tool_name = _first_non_empty(
             serialized.get("name"),
@@ -884,6 +897,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
+        """Finalize a tool span with results."""
         record = self._spans.get(str(run_id))
         if not record:
             return
@@ -903,6 +917,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
+        """Mark a tool span as errored."""
         self._end_span(
             run_id,
             status=Status(StatusCode.ERROR, str(error)),
@@ -917,6 +932,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
+        """Cache tool context emitted from agent actions."""
         # AgentAction is emitted before tool execution; store arguments so that
         # subsequent tool spans can include more context.
         resolved_parent = self._resolve_parent_id(parent_run_id)
@@ -939,6 +955,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
+        """Close an agent span and record outputs."""
         record = self._spans.get(str(run_id))
         if not record:
             return
@@ -959,6 +976,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         metadata: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Any:
+        """Start a retriever span."""
         resolved_parent = self._resolve_parent_id(parent_run_id)
         attributes = {
             Attrs.OPERATION_NAME: "execute_tool",
@@ -991,6 +1009,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
+        """Record retriever results and close the span."""
         record = self._spans.get(str(run_id))
         if not record:
             return
@@ -1008,6 +1027,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
+        """Mark a retriever span as errored."""
         self._end_span(
             run_id,
             status=Status(StatusCode.ERROR, str(error)),
@@ -1095,7 +1115,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         if service_tier:
             attributes[Attrs.OPENAI_REQUEST_SERVICE_TIER] = service_tier
 
-        span_name = f"{attributes[Attrs.OPERATION_NAME]} {model_name}" if model_name else attributes[Attrs.OPERATION_NAME]  # type: ignore[index]
+        operation_name = attributes[Attrs.OPERATION_NAME]
+        span_name = f"{operation_name} {model_name}" if model_name else operation_name
         resolved_parent = self._resolve_parent_id(parent_run_id)
         self._start_span(
             run_id,
@@ -1142,7 +1163,10 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         if resolved_parent_key and resolved_parent_key in self._spans:
             parent_record = self._spans[resolved_parent_key]
             actual_parent_record = parent_record
-            if operation == "execute_tool" and parent_record.operation == "invoke_agent":
+            if (
+                operation == "execute_tool"
+                and parent_record.operation == "invoke_agent"
+            ):
                 last_chat = parent_record.stash.get("last_chat_run")
                 if last_chat and last_chat in self._spans:
                     actual_parent_record = self._spans[last_chat]
@@ -1167,7 +1191,9 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         )
         self._run_parent_override[run_key] = resolved_parent_key
         if resolved_parent_key and resolved_parent_key in self._spans:
-            conv_id = self._spans[resolved_parent_key].attributes.get(Attrs.CONVERSATION_ID)
+            conv_id = self._spans[resolved_parent_key].attributes.get(
+                Attrs.CONVERSATION_ID
+            )
             if conv_id and Attrs.CONVERSATION_ID not in (attributes or {}):
                 span.set_attribute(Attrs.CONVERSATION_ID, conv_id)
                 self._spans[run_key].attributes[Attrs.CONVERSATION_ID] = conv_id

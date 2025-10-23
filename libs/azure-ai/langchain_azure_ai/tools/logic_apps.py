@@ -11,7 +11,7 @@ from langchain_core.tools import BaseTool
 from pydantic import PrivateAttr, model_validator
 
 try:
-    from azure.mgmt.logic import LogicManagementClient
+    from azure.mgmt.logic import LogicManagementClient  # type: ignore[import-untyped]
 except ImportError:
     raise ImportError(
         "To use the Azure Logic Apps tool, please install the 'azure-mgmt-logic'"
