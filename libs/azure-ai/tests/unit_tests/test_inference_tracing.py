@@ -4,6 +4,8 @@ from typing import Any, Dict, List, Optional, Tuple, cast
 from uuid import uuid4
 
 import pytest
+from langchain_core.agents import AgentAction
+from langchain_core.documents import Document
 from langchain_core.messages import (
     AIMessage,
     BaseMessage,
@@ -11,7 +13,6 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.outputs import ChatGeneration, LLMResult
-from langchain_core.documents import Document
 from opentelemetry.trace.status import StatusCode
 
 import langchain_azure_ai.callbacks.tracers.inference_tracing as tracing
@@ -30,9 +31,7 @@ class MockSpan:
     status: Optional[Any]
     exceptions: List[Exception]
 
-    def __init__(
-        self, name: str, attributes: Optional[Dict[str, Any]] = None
-    ) -> None:
+    def __init__(self, name: str, attributes: Optional[Dict[str, Any]] = None) -> None:
         self.name = name
         self.attributes = dict(attributes or {})
         self.events = []
@@ -89,8 +88,18 @@ def patch_otel(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tracing, "get_current_span", lambda: None)
 
 
-def get_last_span_for(tracer_obj: Any) -> MockSpan:
-    return tracer_obj._tracer.spans[-1]
+def get_last_span_for(
+    tracer_obj: tracing.AzureAIOpenTelemetryTracer,
+) -> MockSpan:
+    tracer = cast(MockTracer, tracer_obj._tracer)  # type: ignore[attr-defined]
+    return tracer.spans[-1]
+
+
+def get_all_spans(
+    tracer_obj: tracing.AzureAIOpenTelemetryTracer,
+) -> List[MockSpan]:
+    tracer = cast(MockTracer, tracer_obj._tracer)  # type: ignore[attr-defined]
+    return list(tracer.spans)
 
 
 def test_llm_start_attributes_content_recording_on(
@@ -108,7 +117,7 @@ def test_llm_start_attributes_content_recording_on(
         }
     }
     # fmt: on
-    prompts = [{"role": "user", "content": "hello"}]
+    prompts = cast(List[str], [{"role": "user", "content": "hello"}])
     t.on_llm_start(
         serialized,
         prompts,
@@ -143,7 +152,7 @@ def test_llm_start_attributes_content_recording_off(
             "azure_endpoint": "https://contoso.openai.azure.com",
         }
     }
-    prompts = [{"role": "user", "content": "hello"}]
+    prompts = cast(List[str], [{"role": "user", "content": "hello"}])
     t.on_llm_start(
         serialized,
         prompts,
@@ -189,7 +198,7 @@ def test_usage_and_response_metadata() -> None:
     t = tracing.AzureAIOpenTelemetryTracer()
     run_id = uuid4()
     serialized = {"kwargs": {"model": "m"}}
-    prompts = [{"role": "user", "content": "hi"}]
+    prompts = cast(List[str], [{"role": "user", "content": "hi"}])
     t.on_llm_start(
         serialized,
         prompts,
@@ -214,20 +223,15 @@ def test_usage_and_response_metadata() -> None:
     assert attrs.get(tracing.Attrs.USAGE_OUTPUT_TOKENS) == 5
     assert attrs.get(tracing.Attrs.RESPONSE_MODEL) == "m"
     assert attrs.get(tracing.Attrs.RESPONSE_ID) == "resp-123"
-    assert (
-        attrs.get(tracing.Attrs.OPENAI_RESPONSE_SERVICE_TIER) == "standard"
-    )
-    assert (
-        attrs.get(tracing.Attrs.OPENAI_RESPONSE_SYSTEM_FINGERPRINT)
-        == "fingerprint"
-    )
+    assert attrs.get(tracing.Attrs.OPENAI_RESPONSE_SERVICE_TIER) == "standard"
+    assert attrs.get(tracing.Attrs.OPENAI_RESPONSE_SYSTEM_FINGERPRINT) == "fingerprint"
 
 
 def test_streaming_token_event(monkeypatch: pytest.MonkeyPatch) -> None:
     t = tracing.AzureAIOpenTelemetryTracer()
     run_id = uuid4()
     serialized = {"kwargs": {"model": "m"}}
-    prompts = [{"role": "user", "content": "hi"}]
+    prompts = cast(List[str], [{"role": "user", "content": "hi"}])
     t.on_llm_start(
         serialized,
         prompts,
@@ -254,9 +258,7 @@ def test_synthetic_execute_tool_under_chat_parent(
     )
     chat_run = uuid4()
     serialized = {"kwargs": {"model": "m"}}
-    msgs = cast(
-        List[List[BaseMessage]], [[HumanMessage(content="prompt")]]
-    )
+    msgs = cast(List[List[BaseMessage]], [[HumanMessage(content="prompt")]])
     t.on_chat_model_start(serialized, msgs, run_id=chat_run, parent_run_id=root)
     tool_run = uuid4()
     t.on_tool_start(
@@ -268,7 +270,7 @@ def test_synthetic_execute_tool_under_chat_parent(
     )
     record = t._spans[str(tool_run)]
     assert record.parent_run_id == str(chat_run)
-    span = record.span
+    span = cast(MockSpan, record.span)
     attrs = span.attributes
     assert attrs.get(tracing.Attrs.OPERATION_NAME) == "execute_tool"
     assert attrs.get(tracing.Attrs.TOOL_NAME) == "get_current_date"
@@ -304,19 +306,22 @@ def test_no_invoke_agent_on_agent_action(
     before = len(
         [
             s
-            for s in t._tracer.spans
+            for s in get_all_spans(t)
             if s.attributes.get(tracing.Attrs.OPERATION_NAME) == "invoke_agent"
         ]
     )
-    action = SimpleNamespace(
-        agent_name="Agent",
-        system_instructions=[{"type": "text", "content": "You are an agent."}],
+    action = cast(
+        AgentAction,
+        SimpleNamespace(
+            agent_name="Agent",
+            system_instructions=[{"type": "text", "content": "You are an agent."}],
+        ),
     )
     t.on_agent_action(action, run_id=uuid4())
     after = len(
         [
             s
-            for s in t._tracer.spans
+            for s in get_all_spans(t)
             if s.attributes.get(tracing.Attrs.OPERATION_NAME) == "invoke_agent"
         ]
     )
@@ -391,7 +396,7 @@ def test_tool_deduplicates_synthetic_entries(
     t.on_chain_end({}, run_id=root)
     tool_spans = [
         s
-        for s in t._tracer.spans
+        for s in get_all_spans(t)
         if s.attributes.get(tracing.Attrs.OPERATION_NAME) == "execute_tool"
     ]
     assert len(tool_spans) == 1
@@ -409,9 +414,10 @@ def test_invoke_agent_records_tool_definitions(
         {"name": "search_docs", "description": "Search knowledge base"},
     ]
     run_id = uuid4()
+    prompts = cast(List[str], [{"role": "user", "content": "hi"}])
     t.on_llm_start(
         {"kwargs": {"model": "m"}},
-        [{"role": "user", "content": "hi"}],
+        prompts,
         run_id=run_id,
         invocation_params={"model": "m", "tools": tools},
     )
@@ -432,9 +438,10 @@ def test_finish_reasons_normalized() -> None:
     )
     result = LLMResult(generations=[[gen]], llm_output={})
     # Create chat span and then end it
+    prompts = cast(List[str], [{"role": "user", "content": "hi"}])
     t.on_llm_start(
         {"kwargs": {"model": "m"}},
-        [{"role": "user", "content": "hi"}],
+        prompts,
         run_id=chat_run,
         invocation_params={"model": "m"},
     )
@@ -454,9 +461,10 @@ def test_chat_parenting_under_root_agent(
     t.on_chain_start({}, {"messages": [{"role": "user", "content": "hi"}]}, run_id=root)
     # Start chat without specifying parent; should parent under root agent
     chat_run = uuid4()
+    prompts = cast(List[str], [{"role": "user", "content": "hello"}])
     t.on_llm_start(
         {"kwargs": {"model": "m"}},
-        [{"role": "user", "content": "hello"}],
+        prompts,
         run_id=chat_run,
         parent_run_id=root,
         invocation_params={"model": "m"},
@@ -471,9 +479,10 @@ def test_llm_error_sets_status_and_exception(
     t = tracing.AzureAIOpenTelemetryTracer()
     run_id = uuid4()
     serialized = {"kwargs": {"model": "m"}}
+    prompts = cast(List[str], [{"role": "user", "content": "hi"}])
     t.on_llm_start(
         serialized,
-        [{"role": "user", "content": "hi"}],
+        prompts,
         run_id=run_id,
         invocation_params={"model": "m"},
     )
@@ -524,7 +533,7 @@ def test_choice_count_only_when_n_not_one(
     t = tracing.AzureAIOpenTelemetryTracer()
     run_id = uuid4()
     serialized = {"kwargs": {"model": "m", "n": 1}}
-    prompts = [{"role": "user", "content": "hi"}]
+    prompts = cast(List[str], [{"role": "user", "content": "hi"}])
     t.on_llm_start(
         serialized,
         prompts,
@@ -553,9 +562,10 @@ def test_server_port_extraction_variants(
     t = tracing.AzureAIOpenTelemetryTracer()
     # https default port not set
     run1 = uuid4()
+    prompts = cast(List[str], [{"role": "user", "content": "hi"}])
     t.on_llm_start(
         {"kwargs": {"model": "m", "azure_endpoint": "https://host"}},
-        [{"role": "user", "content": "hi"}],
+        prompts,
         run_id=run1,
         invocation_params={"model": "m"},
     )
@@ -565,7 +575,7 @@ def test_server_port_extraction_variants(
     run2 = uuid4()
     t.on_llm_start(
         {"kwargs": {"model": "m", "azure_endpoint": "https://host:8443"}},
-        [{"role": "user", "content": "hi"}],
+        prompts,
         run_id=run2,
         invocation_params={"model": "m"},
     )
@@ -575,7 +585,7 @@ def test_server_port_extraction_variants(
     run3 = uuid4()
     t.on_llm_start(
         {"kwargs": {"model": "m", "azure_endpoint": "http://host"}},
-        [{"role": "user", "content": "hi"}],
+        prompts,
         run_id=run3,
         invocation_params={"model": "m"},
     )
@@ -585,7 +595,7 @@ def test_server_port_extraction_variants(
     run4 = uuid4()
     t.on_llm_start(
         {"kwargs": {"model": "m", "azure_endpoint": "http://host:8080"}},
-        [{"role": "user", "content": "hi"}],
+        prompts,
         run_id=run4,
         invocation_params={"model": "m"},
     )
@@ -615,25 +625,18 @@ def test_retriever_start_end(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_parser_start_end(monkeypatch: pytest.MonkeyPatch) -> None:
     t = tracing.AzureAIOpenTelemetryTracer(enable_content_recording=True)
-    run_id = uuid4()
-    serialized = {"id": "parser1", "kwargs": {"_type": "json"}}
-    inputs = {"x": 1}
-    outputs = {"y": 2}
     with pytest.raises(AttributeError):
-        t.on_parser_start(serialized, inputs, run_id=run_id)
+        getattr(t, "on_parser_start")
     with pytest.raises(AttributeError):
-        t.on_parser_end(outputs, run_id=run_id)
+        getattr(t, "on_parser_end")
 
 
 def test_transform_start_end(monkeypatch: pytest.MonkeyPatch) -> None:
     t = tracing.AzureAIOpenTelemetryTracer(enable_content_recording=True)
-    run_id = uuid4()
-    serialized = {"id": "transform1", "kwargs": {"type": "map"}}
-    inputs = [1, 2, 3]
     with pytest.raises(AttributeError):
-        t.on_transform_start(serialized, inputs, run_id=run_id)
+        getattr(t, "on_transform_start")
     with pytest.raises(AttributeError):
-        t.on_transform_end({}, run_id=run_id)
+        getattr(t, "on_transform_end")
 
 
 def test_pending_tool_call_cached_for_chain_end(
@@ -651,8 +654,6 @@ def test_pending_tool_call_cached_for_chain_end(
     span = get_last_span_for(t)
     input_messages = json.loads(span.attributes[tracing.Attrs.INPUT_MESSAGES])
     parts = input_messages[0]["parts"]
-    tool_part = next(
-        part for part in parts if part.get("type") == "tool_call_response"
-    )
+    tool_part = next(part for part in parts if part.get("type") == "tool_call_response")
     assert tool_part["id"] == "abc"
     assert tool_part["result"] == "result"
