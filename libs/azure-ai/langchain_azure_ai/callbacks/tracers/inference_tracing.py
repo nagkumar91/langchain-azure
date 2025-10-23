@@ -120,12 +120,13 @@ def _as_json_attribute(value: Any) -> str:
         return json.dumps(str(value), ensure_ascii=False)
 
 
-def _redact_content() -> dict[str, str]:
+def _redact_text_content() -> dict[str, str]:
     return {"type": "text", "content": "[redacted]"}
 
 
 def _message_role(message: Union[BaseMessage, dict[str, Any]]) -> str:
     if isinstance(message, BaseMessage):
+        # LangChain message types map to GenAI roles
         if isinstance(message, HumanMessage):
             return "user"
         if isinstance(message, ToolMessage):
@@ -151,35 +152,56 @@ def _message_content(message: Union[BaseMessage, dict[str, Any]]) -> Any:
     return message.get("content")
 
 
-def _extract_system_instructions(
-    formatted_messages: Iterable[dict[str, Any]]
-) -> Optional[str]:
-    system_parts: List[dict[str, str]] = []
-    for msg in formatted_messages:
-        if msg.get("role") != "system":
-            continue
-        for part in msg.get("parts", []):
-            if part.get("type") == "text" and part.get("content"):
-                system_parts.append({"type": "text", "content": part["content"]})
-    if not system_parts:
+def _coerce_content_to_text(content: Any) -> Optional[str]:
+    if content is None:
         return None
-    return _as_json_attribute(system_parts)
+    if isinstance(content, str):
+        return content
+    if isinstance(content, (list, tuple)):
+        return " ".join(str(part) for part in content if part is not None)
+    return str(content)
 
 
-def _format_messages(
+def _extract_tool_calls(message: Union[BaseMessage, dict[str, Any]]) -> List[dict[str, Any]]:
+    if isinstance(message, AIMessage) and getattr(message, "tool_calls", None):
+        tool_calls = getattr(message, "tool_calls") or []
+        if isinstance(tool_calls, list):
+            return [tc for tc in tool_calls if isinstance(tc, dict)]
+    elif isinstance(message, dict):
+        tool_calls = message.get("tool_calls") or []
+        if isinstance(tool_calls, list):
+            return [tc for tc in tool_calls if isinstance(tc, dict)]
+    return []
+
+
+def _tool_call_id_from_message(
+    message: Union[BaseMessage, dict[str, Any]]
+) -> Optional[str]:
+    if isinstance(message, ToolMessage):
+        if getattr(message, "tool_call_id", None):
+            return str(message.tool_call_id)
+    if isinstance(message, dict):
+        if message.get("tool_call_id"):
+            return str(message["tool_call_id"])
+    return None
+
+
+def _prepare_messages(
     raw_messages: Any,
     *,
     record_content: bool,
-) -> Optional[str]:
-    """Normalise messages into the GenAI `role/parts` schema."""
+    include_roles: Optional[Iterable[str]] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    """Return (formatted_messages_json, system_instructions_json)."""
 
     if not raw_messages:
-        return None
+        return None, None
+
+    include_role_set = set(include_roles) if include_roles is not None else None
 
     if isinstance(raw_messages, dict):
         iterable: Sequence[Any] = raw_messages.get("messages") or []
     elif isinstance(raw_messages, (list, tuple)):
-        # Some callbacks pass [[msg, msg], ...]; flatten
         if raw_messages and isinstance(raw_messages[0], (list, tuple)):
             iterable = [msg for thread in raw_messages for msg in thread]
         else:
@@ -188,42 +210,66 @@ def _format_messages(
         iterable = [raw_messages]
 
     formatted: List[dict[str, Any]] = []
+    system_parts: List[dict[str, str]] = []
+
     for item in iterable:
         role = _message_role(item)
-        content = _message_content(item)
+        content = _coerce_content_to_text(_message_content(item))
+
+        if role == "system":
+            if content:
+                system_parts.append(
+                    {
+                        "type": "text",
+                        "content": content if record_content else "[redacted]",
+                    }
+                )
+            continue
+
+        if include_role_set is not None and role not in include_role_set:
+            continue
+
         parts: List[dict[str, Any]] = []
 
-        if isinstance(item, AIMessage) and getattr(item, "tool_calls", None):
-            tool_calls = getattr(item, "tool_calls")
-        elif isinstance(item, dict):
-            tool_calls = item.get("tool_calls")
-        else:
-            tool_calls = None
+        if role in {"user", "assistant"} and content:
+            parts.append(
+                {
+                    "type": "text",
+                    "content": content if record_content else "[redacted]",
+                }
+            )
 
-        if record_content and content:
-            parts.append({"type": "text", "content": str(content)})
-        else:
-            parts.append(_redact_content())
+        if role == "tool":
+            tool_result = content if record_content else "[redacted]"
+            parts.append(
+                {
+                    "type": "tool_call_response",
+                    "id": _tool_call_id_from_message(item),
+                    "result": tool_result,
+                }
+            )
 
-        if tool_calls:
-            try:
-                parts.append(
-                    {
-                        "type": "tool_call",
-                        "content": tool_calls,
-                    }
-                )
-            except Exception:  # pragma: no cover
-                parts.append(
-                    {
-                        "type": "tool_call",
-                        "content": "[unserializable tool call]",
-                    }
-                )
+        tool_calls = _extract_tool_calls(item)
+        for tc in tool_calls:
+            arguments = tc.get("args") or tc.get("arguments")
+            if arguments is None:
+                arguments = {}
+            tc_entry = {
+                "type": "tool_call",
+                "id": tc.get("id"),
+                "name": tc.get("name"),
+                "arguments": arguments if record_content else "[redacted]",
+            }
+            parts.append(tc_entry)
+
+        if not parts:
+            parts.append(_redact_text_content())
 
         formatted.append({"role": role, "parts": parts})
 
-    return _as_json_attribute(formatted)
+    formatted_json = _as_json_attribute(formatted) if formatted else None
+    system_json = _as_json_attribute(system_parts) if system_parts else None
+    return formatted_json, system_json
 
 
 def _format_tool_definitions(definitions: Optional[Iterable[Any]]) -> Optional[str]:
@@ -419,17 +465,15 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         if conversation_id:
             attributes[Attrs.CONVERSATION_ID] = str(conversation_id)
 
-        formatted_messages = _format_messages(
+        formatted_messages, system_instr = _prepare_messages(
             inputs.get("messages"),
             record_content=self._content_recording,
+            include_roles={"user", "assistant", "tool"},
         )
         if formatted_messages:
             attributes[Attrs.INPUT_MESSAGES] = formatted_messages
-            system_instr = _extract_system_instructions(
-                json.loads(formatted_messages)
-            )
-            if system_instr:
-                attributes[Attrs.SYSTEM_INSTRUCTIONS] = system_instr
+        if system_instr:
+            attributes[Attrs.SYSTEM_INSTRUCTIONS] = system_instr
 
         span_name = f"invoke_agent {agent_name}" if agent_name else "invoke_agent"
         self._start_span(
@@ -465,9 +509,10 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                     messages_payload = outputs
             else:
                 messages_payload = outputs
-            formatted_messages = _format_messages(
+            formatted_messages, _ = _prepare_messages(
                 messages_payload,
                 record_content=self._content_recording,
+                include_roles={"assistant"},
             )
             if formatted_messages:
                 record.span.set_attribute(Attrs.OUTPUT_MESSAGES, formatted_messages)
@@ -551,17 +596,26 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
 
         if chat_generations:
             messages = [gen.message for gen in chat_generations if gen.message]
-            formatted = _format_messages(
+            formatted, _ = _prepare_messages(
                 messages,
                 record_content=self._content_recording,
+                include_roles={"assistant"},
             )
             if formatted:
                 record.span.set_attribute(Attrs.OUTPUT_MESSAGES, formatted)
                 output_type = "text"
-                if any(
-                    getattr(msg, "tool_calls", None) for msg in messages if msg is not None
-                ):
-                    output_type = "json"
+                try:
+                    parsed = json.loads(formatted)
+                    if any(
+                        part.get("type") == "tool_call"
+                        for msg in parsed
+                        for part in msg.get("parts", [])
+                    ):
+                        output_type = "json"
+                except Exception:  # pragma: no cover
+                    LOGGER.debug(
+                        "Failed to inspect output message for tool calls", exc_info=True
+                    )
                 record.span.set_attribute(Attrs.OUTPUT_TYPE, output_type)
 
         finish_reasons: List[str] = []
@@ -842,21 +896,21 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                 invocation_params["response_format"]
             )
 
-        formatted_input = _format_messages(
+        formatted_input, system_instr = _prepare_messages(
             inputs,
             record_content=self._content_recording,
+            include_roles={"user", "assistant", "tool"},
         )
         if formatted_input:
             attributes[Attrs.INPUT_MESSAGES] = formatted_input
-            system_instr = _extract_system_instructions(json.loads(formatted_input))
-            if system_instr:
-                attributes[Attrs.SYSTEM_INSTRUCTIONS] = system_instr
+        if system_instr:
+            attributes[Attrs.SYSTEM_INSTRUCTIONS] = system_instr
 
         tool_definitions = invocation_params.get("tools")
+        tool_definitions_json = None
         if tool_definitions:
-            attributes[Attrs.TOOL_DEFINITIONS] = _format_tool_definitions(
-                tool_definitions
-            )
+            tool_definitions_json = _format_tool_definitions(tool_definitions)
+            attributes[Attrs.TOOL_DEFINITIONS] = tool_definitions_json
 
         server_address = _infer_server_address(serialized, invocation_params)
         if server_address:
@@ -878,6 +932,13 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             parent_run_id=parent_run_id,
             attributes=attributes,
         )
+        if tool_definitions_json and parent_run_id:
+            parent_record = self._spans.get(str(parent_run_id))
+            if parent_record:
+                parent_record.span.set_attribute(
+                    Attrs.TOOL_DEFINITIONS, tool_definitions_json
+                )
+                parent_record.attributes[Attrs.TOOL_DEFINITIONS] = tool_definitions_json
 
     def _start_span(
         self,

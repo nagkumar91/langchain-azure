@@ -12,6 +12,7 @@ the provider selected via `API_HOST`.
 from __future__ import annotations
 
 import os
+import logging
 from pathlib import Path
 
 import azure.identity
@@ -28,12 +29,64 @@ from langchain_azure_ai.callbacks.tracers import (
     DebuggingCallbackHandler,
 )
 
+from opentelemetry import trace as otel_trace
+
 LOG_PATH = Path(__file__).with_suffix(".log")
+RUN_LOG_PATH = Path(__file__).with_suffix(".run.log")
 ENV_PATH = Path(__file__).with_name(".env")
+LOGGER = logging.getLogger("time_travel_debug_sample")
 
 
 def _load_environment() -> None:
     load_dotenv(dotenv_path=ENV_PATH, override=True)
+
+
+def _attach_file_logger(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if any(
+        isinstance(handler, logging.FileHandler)
+        and getattr(handler, "baseFilename", "") == str(path)
+        for handler in LOGGER.handlers
+    ):
+        return
+    file_handler = logging.FileHandler(path, encoding="utf-8")
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
+    )
+    LOGGER.addHandler(file_handler)
+    LOGGER.setLevel(logging.INFO)
+
+
+def _configure_otlp_exporter() -> None:
+    endpoint = (
+        os.getenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+        or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+    )
+    if not endpoint:
+        return
+    protocol = os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc").lower()
+    try:
+        provider = otel_trace.get_tracer_provider()
+        if not hasattr(provider, "add_span_processor"):
+            LOGGER.warning("Tracer provider does not support span processors")
+            return
+        if protocol in {"grpc", "grpc/protobuf"}:
+            from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+                OTLPSpanExporter,
+            )
+        elif protocol in {"http", "http/protobuf"}:
+            from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+                OTLPSpanExporter,
+            )
+        else:
+            LOGGER.warning("Unsupported OTLP protocol '%s'", protocol)
+            return
+        from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+        exporter = OTLPSpanExporter(endpoint=endpoint)
+        provider.add_span_processor(BatchSpanProcessor(exporter))
+    except Exception as exc:  # pragma: no cover - runtime config issue
+        LOGGER.warning("Failed to configure OTLP exporter: %s", exc)
 
 
 def _build_model() -> ChatOpenAI:
@@ -113,12 +166,14 @@ def build_graph(model: ChatOpenAI) -> StateGraph:
 
 def main() -> None:
     _load_environment()
+    _attach_file_logger(RUN_LOG_PATH)
 
     azure_tracer = AzureAIOpenTelemetryTracer(
         connection_string=os.environ.get("APPLICATION_INSIGHTS_CONNECTION_STRING"),
         enable_content_recording=os.getenv("OTEL_RECORD_CONTENT", "true").lower() == "true",
         name="Music Player Agent",
     )
+    _configure_otlp_exporter()
     debug_callback = DebuggingCallbackHandler(
         log_path=LOG_PATH,
         name="TimeTravelDebugCallback",
@@ -132,10 +187,12 @@ def main() -> None:
         "configurable": {"thread_id": "1"},
         "callbacks": [azure_tracer, debug_callback],
     }
+    LOGGER.info("Starting time travel sample with config: %s", config["configurable"])
     input_message = HumanMessage(content="Can you play Taylor Swift's most popular song?")
 
     for event in app.stream({"messages": [input_message]}, config, stream_mode="values"):
         event["messages"][-1].pretty_print()
+    LOGGER.info("Sample run complete")
 
 
 if __name__ == "__main__":
