@@ -113,7 +113,6 @@ class Attrs:
 
 def _as_json_attribute(value: Any) -> str:
     """Return a JSON string suitable for OpenTelemetry string attributes."""
-
     try:
         return json.dumps(value, default=str, ensure_ascii=False)
     except Exception:  # pragma: no cover - defensive
@@ -193,7 +192,6 @@ def _prepare_messages(
     include_roles: Optional[Iterable[str]] = None,
 ) -> tuple[Optional[str], Optional[str]]:
     """Return (formatted_messages_json, system_instructions_json)."""
-
     if not raw_messages:
         return None, None
 
