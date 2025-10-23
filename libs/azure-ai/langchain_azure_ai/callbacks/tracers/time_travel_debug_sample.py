@@ -1,18 +1,9 @@
-"""LangGraph “time travel DJ” sample instrumented with debug tracing.
-
-Run with:
-
-    /Users/nagkumar/Documents/msft.nosync/python-ai-agent-frameworks-demos/venv/bin/python \
-        time_travel_debug_sample.py
-
-Before running, edit `.env` in this directory with the credentials that match
-the provider selected via `API_HOST`.
-"""
+"""LangGraph time-travel sample instrumented with Azure OTEL tracer."""
 
 from __future__ import annotations
 
-import os
 import logging
+import os
 from pathlib import Path
 
 import azure.identity
@@ -24,37 +15,16 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from langchain_azure_ai.callbacks.tracers import (
-    AzureAIOpenTelemetryTracer,
-    DebuggingCallbackHandler,
-)
+from langchain_azure_ai.callbacks.tracers import AzureAIOpenTelemetryTracer
 
 from opentelemetry import trace as otel_trace
 
-LOG_PATH = Path(__file__).with_suffix(".log")
-RUN_LOG_PATH = Path(__file__).with_suffix(".run.log")
 ENV_PATH = Path(__file__).with_name(".env")
-LOGGER = logging.getLogger("time_travel_debug_sample")
+LOGGER = logging.getLogger(__name__)
 
 
 def _load_environment() -> None:
     load_dotenv(dotenv_path=ENV_PATH, override=True)
-
-
-def _attach_file_logger(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if any(
-        isinstance(handler, logging.FileHandler)
-        and getattr(handler, "baseFilename", "") == str(path)
-        for handler in LOGGER.handlers
-    ):
-        return
-    file_handler = logging.FileHandler(path, encoding="utf-8")
-    file_handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-    )
-    LOGGER.addHandler(file_handler)
-    LOGGER.setLevel(logging.INFO)
 
 
 def _configure_otlp_exporter() -> None:
@@ -166,7 +136,6 @@ def build_graph(model: ChatOpenAI) -> StateGraph:
 
 def main() -> None:
     _load_environment()
-    _attach_file_logger(RUN_LOG_PATH)
 
     azure_tracer = AzureAIOpenTelemetryTracer(
         connection_string=os.environ.get("APPLICATION_INSIGHTS_CONNECTION_STRING"),
@@ -174,10 +143,6 @@ def main() -> None:
         name="Music Player Agent",
     )
     _configure_otlp_exporter()
-    debug_callback = DebuggingCallbackHandler(
-        log_path=LOG_PATH,
-        name="TimeTravelDebugCallback",
-    )
 
     model = _build_model()
     graph = build_graph(model)
@@ -185,14 +150,12 @@ def main() -> None:
 
     config = {
         "configurable": {"thread_id": "1"},
-        "callbacks": [azure_tracer, debug_callback],
+        "callbacks": [azure_tracer],
     }
-    LOGGER.info("Starting time travel sample with config: %s", config["configurable"])
     input_message = HumanMessage(content="Can you play Taylor Swift's most popular song?")
 
     for event in app.stream({"messages": [input_message]}, config, stream_mode="values"):
         event["messages"][-1].pretty_print()
-    LOGGER.info("Sample run complete")
 
 
 if __name__ == "__main__":

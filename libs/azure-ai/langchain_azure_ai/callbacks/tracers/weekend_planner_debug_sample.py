@@ -1,4 +1,4 @@
-"""Single-agent weekend planner sample instrumented with debug tracing."""
+"""Single-agent weekend planner sample instrumented with Azure OTEL tracer."""
 
 from __future__ import annotations
 
@@ -16,35 +16,16 @@ from langchain_openai import AzureChatOpenAI, ChatOpenAI
 from rich import print
 from rich.logging import RichHandler
 
-from langchain_azure_ai.callbacks.tracers import (
-    AzureAIOpenTelemetryTracer,
-    DebuggingAgentMiddleware,
-    DebuggingCallbackHandler,
-)
+from langchain_azure_ai.callbacks.tracers import AzureAIOpenTelemetryTracer
 
 from opentelemetry import trace as otel_trace
 
-LOG_PATH = Path(__file__).with_suffix(".log")
-RUN_LOG_PATH = Path(__file__).with_suffix(".run.log")
 ENV_PATH = Path(__file__).with_name(".env")
+LOGGER = logging.getLogger(__name__)
 
 
 def _load_environment() -> None:
     load_dotenv(dotenv_path=ENV_PATH, override=True)
-
-
-def _attach_file_logger(path: Path, target_logger: logging.Logger) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    for handler in target_logger.handlers:
-        if isinstance(handler, logging.FileHandler) and getattr(
-            handler, "baseFilename", ""
-        ) == str(path):
-            return
-    file_handler = logging.FileHandler(path, encoding="utf-8")
-    file_handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-    )
-    target_logger.addHandler(file_handler)
 
 
 def _configure_otlp_exporter() -> None:
@@ -58,9 +39,7 @@ def _configure_otlp_exporter() -> None:
     try:
         provider = otel_trace.get_tracer_provider()
         if not hasattr(provider, "add_span_processor"):
-            logging.getLogger(__name__).warning(
-                "Tracer provider does not support span processors"
-            )
+            LOGGER.warning("Tracer provider does not support span processors")
             return
         if protocol in {"grpc", "grpc/protobuf"}:
             from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
@@ -71,18 +50,14 @@ def _configure_otlp_exporter() -> None:
                 OTLPSpanExporter,
             )
         else:
-            logging.getLogger(__name__).warning(
-                "Unsupported OTLP protocol '%s'", protocol
-            )
+            LOGGER.warning("Unsupported OTLP protocol '%s'", protocol)
             return
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
         exporter = OTLPSpanExporter(endpoint=endpoint)
         provider.add_span_processor(BatchSpanProcessor(exporter))
     except Exception as exc:  # pragma: no cover - runtime config issue
-        logging.getLogger(__name__).warning(
-            "Failed to configure OTLP exporter: %s", exc
-        )
+        LOGGER.warning("Failed to configure OTLP exporter: %s", exc)
 
 
 def _build_model() -> ChatOpenAI:
@@ -157,7 +132,6 @@ def main() -> None:
     logger.setLevel(logging.INFO)
 
     _load_environment()
-    _attach_file_logger(RUN_LOG_PATH, logging.getLogger())
 
     azure_tracer = AzureAIOpenTelemetryTracer(
         connection_string=os.environ.get("APPLICATION_INSIGHTS_CONNECTION_STRING"),
@@ -165,15 +139,6 @@ def main() -> None:
         name="Weekend Planner Agent",
     )
     _configure_otlp_exporter()
-    debug_callback = DebuggingCallbackHandler(
-        log_path=LOG_PATH,
-        name="WeekendPlannerCallback",
-    )
-    debug_middleware = DebuggingAgentMiddleware(
-        log_path=LOG_PATH,
-        name="WeekendPlannerMiddleware",
-        include_runtime_snapshot=True,
-    )
 
     model = _build_model()
     agent = create_agent(
@@ -184,12 +149,11 @@ def main() -> None:
             "weather, don't suggest it. Include the date of the weekend in your response."
         ),
         tools=[get_weather, get_activities, get_current_date],
-        middleware=[debug_middleware],
     )
 
     response = agent.invoke(
         {"messages": [{"role": "user", "content": "hi what can I do this weekend in San Francisco?"}]},
-        config={"callbacks": [azure_tracer, debug_callback]},
+        config={"callbacks": [azure_tracer]},
     )
     latest_message = response["messages"][-1]
     print(latest_message.content)

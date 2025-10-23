@@ -1,4 +1,4 @@
-"""Multi-agent supervisor sample instrumented with debug tracing."""
+"""Multi-agent supervisor sample instrumented with Azure OTEL tracer."""
 
 from __future__ import annotations
 
@@ -17,35 +17,16 @@ from langchain_openai import AzureChatOpenAI, ChatOpenAI
 from rich import print
 from rich.logging import RichHandler
 
-from langchain_azure_ai.callbacks.tracers import (
-    AzureAIOpenTelemetryTracer,
-    DebuggingAgentMiddleware,
-    DebuggingCallbackHandler,
-)
+from langchain_azure_ai.callbacks.tracers import AzureAIOpenTelemetryTracer
 
 from opentelemetry import trace as otel_trace
 
-LOG_PATH = Path(__file__).with_suffix(".log")
-RUN_LOG_PATH = Path(__file__).with_suffix(".run.log")
 ENV_PATH = Path(__file__).with_name(".env")
+LOGGER = logging.getLogger(__name__)
 
 
 def _load_environment() -> None:
     load_dotenv(dotenv_path=ENV_PATH, override=True)
-
-
-def _attach_file_logger(path: Path, target_logger: logging.Logger) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    for handler in target_logger.handlers:
-        if isinstance(handler, logging.FileHandler) and getattr(
-            handler, "baseFilename", ""
-        ) == str(path):
-            return
-    file_handler = logging.FileHandler(path, encoding="utf-8")
-    file_handler.setFormatter(
-        logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s")
-    )
-    target_logger.addHandler(file_handler)
 
 
 def _configure_otlp_exporter() -> None:
@@ -59,9 +40,7 @@ def _configure_otlp_exporter() -> None:
     try:
         provider = otel_trace.get_tracer_provider()
         if not hasattr(provider, "add_span_processor"):
-            logging.getLogger(__name__).warning(
-                "Tracer provider does not support span processors"
-            )
+            LOGGER.warning("Tracer provider does not support span processors")
             return
         if protocol in {"grpc", "grpc/protobuf"}:
             from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
@@ -72,18 +51,14 @@ def _configure_otlp_exporter() -> None:
                 OTLPSpanExporter,
             )
         else:
-            logging.getLogger(__name__).warning(
-                "Unsupported OTLP protocol '%s'", protocol
-            )
+            LOGGER.warning("Unsupported OTLP protocol '%s'", protocol)
             return
         from opentelemetry.sdk.trace.export import BatchSpanProcessor
 
         exporter = OTLPSpanExporter(endpoint=endpoint)
         provider.add_span_processor(BatchSpanProcessor(exporter))
     except Exception as exc:  # pragma: no cover
-        logging.getLogger(__name__).warning(
-            "Failed to configure OTLP exporter: %s", exc
-        )
+        LOGGER.warning("Failed to configure OTLP exporter: %s", exc)
 
 
 def _build_base_model() -> ChatOpenAI:
@@ -191,22 +166,13 @@ def check_fridge() -> list[str]:
     return ["tofu", "soy sauce", "broccoli", "carrots"]
 
 
-def _make_tracers(name: str) -> tuple[AzureAIOpenTelemetryTracer, DebuggingCallbackHandler, DebuggingAgentMiddleware]:
-    azure_tracer = AzureAIOpenTelemetryTracer(
+def _configure_tracer(name: str) -> AzureAIOpenTelemetryTracer:
+    tracer = AzureAIOpenTelemetryTracer(
         connection_string=os.environ.get("APPLICATION_INSIGHTS_CONNECTION_STRING"),
         enable_content_recording=os.getenv("OTEL_RECORD_CONTENT", "true").lower() == "true",
         name=name,
     )
-    debug_callback = DebuggingCallbackHandler(
-        log_path=LOG_PATH,
-        name=f"{name}Callback",
-    )
-    debug_middleware = DebuggingAgentMiddleware(
-        log_path=LOG_PATH,
-        name=f"{name}Middleware",
-        include_runtime_snapshot=True,
-    )
-    return azure_tracer, debug_callback, debug_middleware
+    return tracer
 
 
 def main() -> None:
@@ -219,25 +185,13 @@ def main() -> None:
     logger.setLevel(logging.INFO)
 
     _load_environment()
-    _attach_file_logger(RUN_LOG_PATH, logging.getLogger())
 
     base_model = _build_base_model()
 
-    (
-        supervisor_tracer,
-        supervisor_callback,
-        supervisor_middleware,
-    ) = _make_tracers("Supervisor Agent")
-    (
-        activity_tracer,
-        activity_callback,
-        activity_middleware,
-    ) = _make_tracers("Weekend Activity Planner")
-    (
-        meal_tracer,
-        meal_callback,
-        meal_middleware,
-    ) = _make_tracers("Meal Recipe Planner")
+    supervisor_tracer = _configure_tracer("Supervisor Agent")
+    activity_tracer = _configure_tracer("Weekend Activity Planner")
+    meal_tracer = _configure_tracer("Meal Recipe Planner")
+    _configure_otlp_exporter()
 
     weekend_agent = create_agent(
         model=base_model,
@@ -247,16 +201,14 @@ def main() -> None:
             "suggest it. Include the date of the weekend in your response."
         ),
         tools=[get_weather, get_activities, get_current_date],
-        middleware=[activity_middleware],
     )
 
     @tool
     def plan_weekend(query: str) -> str:
-        """Plan a weekend based on user query and return the final response."""
         logger.info("Tool: plan_weekend invoked")
         response = weekend_agent.invoke(
             {"messages": [HumanMessage(content=query)]},
-            config={"callbacks": [activity_tracer, activity_callback]},
+            config={"callbacks": [activity_tracer]},
         )
         return response["messages"][-1].content
 
@@ -268,16 +220,14 @@ def main() -> None:
             "from the store when their fridge is missing ingredients."
         ),
         tools=[find_recipes, check_fridge],
-        middleware=[meal_middleware],
     )
 
     @tool
     def plan_meal(query: str) -> str:
-        """Plan a meal based on user query and return the final response."""
         logger.info("Tool: plan_meal invoked")
         response = meal_agent.invoke(
             {"messages": [HumanMessage(content=query)]},
-            config={"callbacks": [meal_tracer, meal_callback]},
+            config={"callbacks": [meal_tracer]},
         )
         return response["messages"][-1].content
 
@@ -288,10 +238,7 @@ def main() -> None:
             "agent. Assign work to them as needed in order to answer the user's question."
         ),
         tools=[plan_weekend, plan_meal],
-        middleware=[supervisor_middleware],
     )
-
-    _configure_otlp_exporter()
 
     response = supervisor_agent.invoke(
         {
@@ -302,7 +249,7 @@ def main() -> None:
                 }
             ]
         },
-        config={"callbacks": [supervisor_tracer, supervisor_callback]},
+        config={"callbacks": [supervisor_tracer]},
     )
     latest_message = response["messages"][-1]
     print(latest_message.content)
