@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, is_dataclass
 from threading import Lock
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 from uuid import UUID
@@ -272,6 +272,46 @@ def _prepare_messages(
     return formatted_json, system_json
 
 
+def _scrub_value(value: Any, record_content: bool) -> Any:
+    if not record_content:
+        return "[redacted]"
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, BaseMessage):
+        return {
+            "type": value.type,
+            "content": _coerce_content_to_text(value.content),
+        }
+    if isinstance(value, dict):
+        return {k: _scrub_value(v, record_content) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_scrub_value(v, record_content) for v in value]
+    if is_dataclass(value):
+        try:
+            return asdict(value)
+        except Exception:  # pragma: no cover
+            return str(value)
+    return str(value)
+
+
+def _serialise_tool_result(output: Any, record_content: bool) -> str:
+    if isinstance(output, ToolMessage):
+        data = {
+            "name": getattr(output, "name", None),
+            "tool_call_id": _tool_call_id_from_message(output),
+            "content": _scrub_value(output.content, record_content),
+        }
+        return _as_json_attribute(data)
+    if isinstance(output, BaseMessage):
+        data = {
+            "type": output.type,
+            "content": _scrub_value(output.content, record_content),
+        }
+        return _as_json_attribute(data)
+    scrubbed = _scrub_value(output, record_content)
+    return _as_json_attribute(scrubbed)
+
+
 def _format_tool_definitions(definitions: Optional[Iterable[Any]]) -> Optional[str]:
     if not definitions:
         return None
@@ -438,6 +478,25 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         self._spans: Dict[str, _SpanRecord] = {}
         self._lock = Lock()
 
+    def _should_ignore_agent_span(self, agent_name: Optional[str]) -> bool:
+        if not agent_name:
+            return False
+        return "Middleware." in agent_name
+
+    def _update_parent_attribute(
+        self,
+        parent_run_id: Optional[UUID],
+        attr: str,
+        value: Any,
+    ) -> None:
+        if not parent_run_id or value is None:
+            return
+        parent_record = self._spans.get(str(parent_run_id))
+        if not parent_record:
+            return
+        parent_record.span.set_attribute(attr, value)
+        parent_record.attributes[attr] = value
+
     # ---------------------------------------------------------------------
     # BaseCallbackHandler overrides
     # ---------------------------------------------------------------------
@@ -456,6 +515,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             kwargs.get("name"),
             (metadata or {}).get("langgraph_node"),
         )
+        if self._should_ignore_agent_span(agent_name):
+            return
         attributes: Dict[str, Any] = {
             Attrs.OPERATION_NAME: "invoke_agent",
         }
@@ -484,6 +545,14 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             parent_run_id=parent_run_id,
             attributes=attributes,
         )
+        if formatted_messages:
+            self._update_parent_attribute(
+                parent_run_id, Attrs.INPUT_MESSAGES, formatted_messages
+            )
+        if system_instr:
+            self._update_parent_attribute(
+                parent_run_id, Attrs.SYSTEM_INSTRUCTIONS, system_instr
+            )
 
     def on_chain_end(
         self,
@@ -709,6 +778,13 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             attributes[Attrs.TOOL_CALL_ARGUMENTS] = _as_json_attribute(inputs)
         elif input_str:
             attributes[Attrs.TOOL_CALL_ARGUMENTS] = input_str
+        parent_provider = None
+        if parent_run_id:
+            parent_record = self._spans.get(str(parent_run_id))
+            if parent_record:
+                parent_provider = parent_record.attributes.get(Attrs.PROVIDER_NAME)
+        if parent_provider:
+            attributes[Attrs.PROVIDER_NAME] = parent_provider
 
         self._start_span(
             run_id,
@@ -731,7 +807,10 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         if not record:
             return
         if output is not None:
-            record.span.set_attribute(Attrs.TOOL_CALL_RESULT, _as_json_attribute(output))
+            record.span.set_attribute(
+                Attrs.TOOL_CALL_RESULT,
+                _serialise_tool_result(output, self._content_recording),
+            )
         record.span.set_status(Status(StatusCode.OK))
         self._end_span(run_id)
 
@@ -802,6 +881,13 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             Attrs.TOOL_TYPE: "retriever",
             Attrs.RETRIEVER_QUERY: query,
         }
+        parent_provider = None
+        if parent_run_id:
+            parent_record = self._spans.get(str(parent_run_id))
+            if parent_record:
+                parent_provider = parent_record.attributes.get(Attrs.PROVIDER_NAME)
+        if parent_provider:
+            attributes[Attrs.PROVIDER_NAME] = parent_provider
         self._start_span(
             run_id,
             name=f"execute_tool {serialized.get('name', 'retriever')}",
@@ -932,6 +1018,18 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             parent_run_id=parent_run_id,
             attributes=attributes,
         )
+        if provider:
+            self._update_parent_attribute(
+                parent_run_id, Attrs.PROVIDER_NAME, provider
+            )
+        if formatted_input:
+            self._update_parent_attribute(
+                parent_run_id, Attrs.INPUT_MESSAGES, formatted_input
+            )
+        if system_instr:
+            self._update_parent_attribute(
+                parent_run_id, Attrs.SYSTEM_INSTRUCTIONS, system_instr
+            )
         if tool_definitions_json and parent_run_id:
             parent_record = self._spans.get(str(parent_run_id))
             if parent_record:
