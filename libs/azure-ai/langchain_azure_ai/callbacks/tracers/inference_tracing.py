@@ -272,11 +272,43 @@ def _prepare_messages(
     return formatted_json, system_json
 
 
+def _filter_assistant_output(formatted_messages: str) -> Optional[str]:
+    try:
+        messages = json.loads(formatted_messages)
+    except Exception:
+        return formatted_messages
+    cleaned: List[dict[str, Any]] = []
+    for msg in messages:
+        if msg.get("role") != "assistant":
+            continue
+        text_parts = [
+            part for part in msg.get("parts", []) if part.get("type") == "text"
+        ]
+        if not text_parts:
+            continue
+        cleaned.append({"role": "assistant", "parts": text_parts})
+    if not cleaned:
+        return None
+    return _as_json_attribute(cleaned)
+
+
 def _scrub_value(value: Any, record_content: bool) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, (bool, int, float)):
+        return value
+    if isinstance(value, str):
+        if not record_content:
+            return "[redacted]"
+        stripped = value.strip()
+        if stripped and stripped[0] in "{[":
+            try:
+                return json.loads(stripped)
+            except Exception:
+                pass
+        return value
     if not record_content:
         return "[redacted]"
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
     if isinstance(value, BaseMessage):
         return {
             "type": value.type,
@@ -477,21 +509,48 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
 
         self._spans: Dict[str, _SpanRecord] = {}
         self._lock = Lock()
+        self._ignored_runs: set[str] = set()
+        self._run_parent_override: Dict[str, Optional[str]] = {}
 
-    def _should_ignore_agent_span(self, agent_name: Optional[str]) -> bool:
-        if not agent_name:
+    def _should_ignore_agent_span(
+        self, agent_name: Optional[str], parent_run_id: Optional[UUID]
+    ) -> bool:
+        if agent_name == "LangGraph":
             return False
-        return "Middleware." in agent_name
+        if parent_run_id is None:
+            return False
+        if agent_name and "Middleware." in agent_name:
+            return True
+        return True
+
+    def _resolve_parent_id(self, parent_run_id: Optional[UUID]) -> Optional[str]:
+        if parent_run_id is None:
+            return None
+        candidate: Optional[str] = str(parent_run_id)
+        visited: set[str] = set()
+        while candidate is not None:
+            if candidate in visited:
+                return None
+            visited.add(candidate)
+            if candidate in self._ignored_runs:
+                candidate = self._run_parent_override.get(candidate)
+                continue
+            override = self._run_parent_override.get(candidate)
+            if override:
+                candidate = override
+                continue
+            return candidate
+        return None
 
     def _update_parent_attribute(
         self,
-        parent_run_id: Optional[UUID],
+        parent_key: Optional[str],
         attr: str,
         value: Any,
     ) -> None:
-        if not parent_run_id or value is None:
+        if not parent_key or value is None:
             return
-        parent_record = self._spans.get(str(parent_run_id))
+        parent_record = self._spans.get(parent_key)
         if not parent_record:
             return
         parent_record.span.set_attribute(attr, value)
@@ -515,13 +574,16 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             kwargs.get("name"),
             (metadata or {}).get("langgraph_node"),
         )
-        if self._should_ignore_agent_span(agent_name):
+        run_key = str(run_id)
+        parent_key = str(parent_run_id) if parent_run_id else None
+        if self._should_ignore_agent_span(agent_name, parent_run_id):
+            self._ignored_runs.add(run_key)
+            self._run_parent_override[run_key] = parent_key
             return
         attributes: Dict[str, Any] = {
             Attrs.OPERATION_NAME: "invoke_agent",
         }
-        if agent_name:
-            attributes[Attrs.AGENT_NAME] = agent_name
+        attributes[Attrs.AGENT_NAME] = self._name
         conversation_id = (metadata or {}).get("thread_id")
         if conversation_id:
             attributes[Attrs.CONVERSATION_ID] = str(conversation_id)
@@ -536,7 +598,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         if system_instr:
             attributes[Attrs.SYSTEM_INSTRUCTIONS] = system_instr
 
-        span_name = f"invoke_agent {agent_name}" if agent_name else "invoke_agent"
+        span_name = f"invoke_agent {self._name}"
+        resolved_parent = self._resolve_parent_id(parent_run_id)
         self._start_span(
             run_id,
             span_name,
@@ -547,11 +610,15 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         )
         if formatted_messages:
             self._update_parent_attribute(
-                parent_run_id, Attrs.INPUT_MESSAGES, formatted_messages
+                resolved_parent, Attrs.INPUT_MESSAGES, formatted_messages
             )
         if system_instr:
             self._update_parent_attribute(
-                parent_run_id, Attrs.SYSTEM_INSTRUCTIONS, system_instr
+                resolved_parent, Attrs.SYSTEM_INSTRUCTIONS, system_instr
+            )
+        if conversation_id:
+            self._update_parent_attribute(
+                resolved_parent, Attrs.CONVERSATION_ID, str(conversation_id)
             )
 
     def on_chain_end(
@@ -562,7 +629,12 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
-        record = self._spans.get(str(run_id))
+        run_key = str(run_id)
+        if run_key in self._ignored_runs:
+            self._ignored_runs.remove(run_key)
+            self._run_parent_override.pop(run_key, None)
+            return
+        record = self._spans.get(run_key)
         if not record:
             return
         try:
@@ -584,7 +656,12 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                 include_roles={"assistant"},
             )
             if formatted_messages:
-                record.span.set_attribute(Attrs.OUTPUT_MESSAGES, formatted_messages)
+                if record.operation == "invoke_agent":
+                    cleaned = _filter_assistant_output(formatted_messages)
+                    if cleaned:
+                        record.span.set_attribute(Attrs.OUTPUT_MESSAGES, cleaned)
+                else:
+                    record.span.set_attribute(Attrs.OUTPUT_MESSAGES, formatted_messages)
         except Exception as exc:  # pragma: no cover - defensive
             LOGGER.debug("Failed to serialise chain outputs: %s", exc, exc_info=True)
         record.span.set_status(Status(status_code=StatusCode.OK))
@@ -598,6 +675,11 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
+        run_key = str(run_id)
+        if run_key in self._ignored_runs:
+            self._ignored_runs.remove(run_key)
+            self._run_parent_override.pop(run_key, None)
+            return
         self._end_span(
             run_id,
             status=Status(StatusCode.ERROR, str(error)),
@@ -755,6 +837,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         inputs: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Any:
+        resolved_parent = self._resolve_parent_id(parent_run_id)
         tool_name = _first_non_empty(
             serialized.get("name"),
             (metadata or {}).get("tool_name"),
@@ -779,10 +862,10 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         elif input_str:
             attributes[Attrs.TOOL_CALL_ARGUMENTS] = input_str
         parent_provider = None
-        if parent_run_id:
-            parent_record = self._spans.get(str(parent_run_id))
-            if parent_record:
-                parent_provider = parent_record.attributes.get(Attrs.PROVIDER_NAME)
+        if resolved_parent and resolved_parent in self._spans:
+            parent_provider = self._spans[resolved_parent].attributes.get(
+                Attrs.PROVIDER_NAME
+            )
         if parent_provider:
             attributes[Attrs.PROVIDER_NAME] = parent_provider
 
@@ -838,13 +921,17 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
     ) -> Any:
         # AgentAction is emitted before tool execution; store arguments so that
         # subsequent tool spans can include more context.
-        record = self._spans.get(str(parent_run_id)) if parent_run_id else None
+        resolved_parent = self._resolve_parent_id(parent_run_id)
+        record = self._spans.get(resolved_parent) if resolved_parent else None
         if record is not None:
             record.stash.setdefault("pending_actions", {})[str(run_id)] = {
                 "tool": action.tool,
                 "tool_input": action.tool_input,
                 "log": action.log,
             }
+            last_chat = record.stash.get("last_chat_run")
+            if last_chat:
+                self._run_parent_override[str(run_id)] = last_chat
 
     def on_agent_finish(
         self,
@@ -874,6 +961,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         metadata: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Any:
+        resolved_parent = self._resolve_parent_id(parent_run_id)
         attributes = {
             Attrs.OPERATION_NAME: "execute_tool",
             Attrs.TOOL_NAME: serialized.get("name", "retriever"),
@@ -882,10 +970,10 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             Attrs.RETRIEVER_QUERY: query,
         }
         parent_provider = None
-        if parent_run_id:
-            parent_record = self._spans.get(str(parent_run_id))
-            if parent_record:
-                parent_provider = parent_record.attributes.get(Attrs.PROVIDER_NAME)
+        if resolved_parent and resolved_parent in self._spans:
+            parent_provider = self._spans[resolved_parent].attributes.get(
+                Attrs.PROVIDER_NAME
+            )
         if parent_provider:
             attributes[Attrs.PROVIDER_NAME] = parent_provider
         self._start_span(
@@ -1010,6 +1098,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             attributes[Attrs.OPENAI_REQUEST_SERVICE_TIER] = service_tier
 
         span_name = f"{attributes[Attrs.OPERATION_NAME]} {model_name}" if model_name else attributes[Attrs.OPERATION_NAME]  # type: ignore[index]
+        resolved_parent = self._resolve_parent_id(parent_run_id)
         self._start_span(
             run_id,
             name=span_name,
@@ -1020,23 +1109,23 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         )
         if provider:
             self._update_parent_attribute(
-                parent_run_id, Attrs.PROVIDER_NAME, provider
+                resolved_parent, Attrs.PROVIDER_NAME, provider
             )
         if formatted_input:
             self._update_parent_attribute(
-                parent_run_id, Attrs.INPUT_MESSAGES, formatted_input
+                resolved_parent, Attrs.INPUT_MESSAGES, formatted_input
             )
         if system_instr:
             self._update_parent_attribute(
-                parent_run_id, Attrs.SYSTEM_INSTRUCTIONS, system_instr
+                resolved_parent, Attrs.SYSTEM_INSTRUCTIONS, system_instr
             )
-        if tool_definitions_json and parent_run_id:
-            parent_record = self._spans.get(str(parent_run_id))
-            if parent_record:
-                parent_record.span.set_attribute(
-                    Attrs.TOOL_DEFINITIONS, tool_definitions_json
-                )
-                parent_record.attributes[Attrs.TOOL_DEFINITIONS] = tool_definitions_json
+        if tool_definitions_json and resolved_parent:
+            self._update_parent_attribute(
+                resolved_parent, Attrs.TOOL_DEFINITIONS, tool_definitions_json
+            )
+        chat_run_key = str(run_id)
+        if resolved_parent and resolved_parent in self._spans:
+            self._spans[resolved_parent].stash["last_chat_run"] = chat_run_key
 
     def _start_span(
         self,
@@ -1049,11 +1138,19 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         attributes: Optional[Dict[str, Any]] = None,
     ) -> None:
         run_key = str(run_id)
+        resolved_parent_key = self._resolve_parent_id(parent_run_id)
         parent_context = None
-        if parent_run_id and str(parent_run_id) in self._spans:
-            parent_span = self._spans[str(parent_run_id)].span
-            parent_context = set_span_in_context(parent_span)
-        elif parent_run_id is None:
+        parent_record = None
+        if resolved_parent_key and resolved_parent_key in self._spans:
+            parent_record = self._spans[resolved_parent_key]
+            actual_parent_record = parent_record
+            if operation == "execute_tool" and parent_record.operation == "invoke_agent":
+                last_chat = parent_record.stash.get("last_chat_run")
+                if last_chat and last_chat in self._spans:
+                    actual_parent_record = self._spans[last_chat]
+                    resolved_parent_key = last_chat
+            parent_context = set_span_in_context(actual_parent_record.span)
+        elif resolved_parent_key is None:
             current_span = get_current_span()
             if current_span and current_span.get_span_context().is_valid:
                 parent_context = set_span_in_context(current_span)
@@ -1067,9 +1164,15 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         self._spans[run_key] = _SpanRecord(
             span=span,
             operation=operation,
-            parent_run_id=str(parent_run_id) if parent_run_id else None,
+            parent_run_id=resolved_parent_key,
             attributes=attributes or {},
         )
+        self._run_parent_override[run_key] = resolved_parent_key
+        if resolved_parent_key and resolved_parent_key in self._spans:
+            conv_id = self._spans[resolved_parent_key].attributes.get(Attrs.CONVERSATION_ID)
+            if conv_id and Attrs.CONVERSATION_ID not in (attributes or {}):
+                span.set_attribute(Attrs.CONVERSATION_ID, conv_id)
+                self._spans[run_key].attributes[Attrs.CONVERSATION_ID] = conv_id
 
     def _end_span(
         self,
@@ -1087,6 +1190,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         if status:
             record.span.set_status(status)
         record.span.end()
+        self._run_parent_override.pop(str(run_id), None)
 
     @classmethod
     def _configure_azure_monitor(cls, connection_string: str) -> None:
