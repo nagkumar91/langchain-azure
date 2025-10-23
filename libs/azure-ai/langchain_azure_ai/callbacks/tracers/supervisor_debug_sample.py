@@ -205,6 +205,7 @@ def main() -> None:
 
     @tool
     def plan_weekend(query: str) -> str:
+        """Delegate weekend planning to the activity agent and return its reply."""
         logger.info("Tool: plan_weekend invoked")
         response = weekend_agent.invoke(
             {"messages": [HumanMessage(content=query)]},
@@ -224,6 +225,7 @@ def main() -> None:
 
     @tool
     def plan_meal(query: str) -> str:
+        """Delegate meal planning to the recipe agent and return its reply."""
         logger.info("Tool: plan_meal invoked")
         response = meal_agent.invoke(
             {"messages": [HumanMessage(content=query)]},
