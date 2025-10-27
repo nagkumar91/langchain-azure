@@ -546,11 +546,13 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         credential: Optional[Any] = None,
         name: str = "AzureAIOpenTelemetryTracer",
         agent_id: Optional[str] = None,
+        provider_name: Optional[str] = None,
     ) -> None:
         """Initialize tracer state and configure Azure Monitor if needed."""
         super().__init__()
         self._name = name
         self._default_agent_id = agent_id
+        self._default_provider_name = provider_name
         self._content_recording = enable_content_recording
         self._tracer = otel_trace.get_tracer(name, schema_url=self._schema_url)
 
@@ -690,6 +692,11 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         for meta_key, meta_value in metadata.items():
             if meta_key.startswith("gen_ai."):
                 attributes[meta_key] = meta_value
+        if (
+            Attrs.PROVIDER_NAME not in attributes
+            and self._default_provider_name
+        ):
+            attributes[Attrs.PROVIDER_NAME] = self._default_provider_name
 
         formatted_messages, system_instr = _prepare_messages(
             inputs.get("messages"),
@@ -1010,6 +1017,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             )
         if parent_provider:
             attributes[Attrs.PROVIDER_NAME] = parent_provider
+        elif self._default_provider_name:
+            attributes[Attrs.PROVIDER_NAME] = self._default_provider_name
 
         self._start_span(
             run_id,
@@ -1192,6 +1201,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         }
         if provider:
             attributes[Attrs.PROVIDER_NAME] = provider
+        elif self._default_provider_name:
+            attributes[Attrs.PROVIDER_NAME] = self._default_provider_name
         if model_name:
             attributes[Attrs.REQUEST_MODEL] = model_name
 
