@@ -577,9 +577,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
     ) -> bool:
         if metadata and metadata.get("otel_agent_span"):
             node_name = metadata.get("langgraph_node")
-            meta_agent_name = metadata.get("agent_name") or metadata.get(
-                "agent_type"
-            )
+            meta_agent_name = metadata.get("agent_name") or metadata.get("agent_type")
             if node_name and meta_agent_name and str(node_name) != str(meta_agent_name):
                 return True
             return False
