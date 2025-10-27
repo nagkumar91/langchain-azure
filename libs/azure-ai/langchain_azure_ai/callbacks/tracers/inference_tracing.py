@@ -60,6 +60,14 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 LOGGER = logging.getLogger(__name__)
+if os.getenv("AZURE_AI_TRACE_DEBUG"):
+    LOGGER.setLevel(logging.DEBUG)
+    if not LOGGER.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s")
+        )
+        LOGGER.addHandler(handler)
 
 
 class Attrs:
@@ -560,8 +568,23 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         self._run_parent_override: Dict[str, Optional[str]] = {}
 
     def _should_ignore_agent_span(
-        self, agent_name: Optional[str], parent_run_id: Optional[UUID]
+        self,
+        agent_name: Optional[str],
+        parent_run_id: Optional[UUID],
+        metadata: Optional[dict[str, Any]],
     ) -> bool:
+        if metadata and metadata.get("otel_agent_span"):
+            node_name = metadata.get("langgraph_node")
+            meta_agent_name = metadata.get("agent_name") or metadata.get(
+                "agent_type"
+            )
+            if (
+                node_name
+                and meta_agent_name
+                and str(node_name) != str(meta_agent_name)
+            ):
+                return True
+            return False
         if agent_name == "LangGraph":
             return False
         if parent_run_id is None:
@@ -618,23 +641,57 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         **kwargs: Any,
     ) -> Any:
         """Handle start of a chain/agent invocation."""
+        metadata = metadata or {}
         agent_name = _first_non_empty(
+            metadata.get("agent_name"),
+            metadata.get("agent_type"),
+            metadata.get("langgraph_node"),
             kwargs.get("name"),
-            (metadata or {}).get("langgraph_node"),
         )
         run_key = str(run_id)
         parent_key = str(parent_run_id) if parent_run_id else None
-        if self._should_ignore_agent_span(agent_name, parent_run_id):
+        if self._should_ignore_agent_span(agent_name, parent_run_id, metadata):
             self._ignored_runs.add(run_key)
             self._run_parent_override[run_key] = parent_key
             return
         attributes: Dict[str, Any] = {
             Attrs.OPERATION_NAME: "invoke_agent",
         }
-        attributes[Attrs.AGENT_NAME] = self._name
-        conversation_id = (metadata or {}).get("thread_id")
+        if agent_name:
+            attributes[Attrs.AGENT_NAME] = str(agent_name)
+        else:
+            attributes[Attrs.AGENT_NAME] = self._name
+        node_label = metadata.get("langgraph_node")
+        if node_label:
+            attributes["metadata.langgraph_node"] = str(node_label)
+        agent_id = metadata.get("agent_id")
+        if agent_id is not None:
+            attributes[Attrs.AGENT_ID] = str(agent_id)
+        agent_description = metadata.get("agent_description")
+        if agent_description:
+            attributes[Attrs.AGENT_DESCRIPTION] = str(agent_description)
+        conversation_id = _first_non_empty(
+            metadata.get("thread_id"),
+            metadata.get("session_id"),
+            metadata.get("conversation_id"),
+        )
         if conversation_id:
             attributes[Attrs.CONVERSATION_ID] = str(conversation_id)
+        path = metadata.get("langgraph_path")
+        if path:
+            attributes["metadata.langgraph_path"] = json.dumps(path, default=str)
+        for key in (
+            Attrs.PROVIDER_NAME,
+            Attrs.SERVER_ADDRESS,
+            Attrs.SERVER_PORT,
+            "service.name",
+        ):
+            value = metadata.get(key)
+            if value is not None:
+                attributes[key] = value
+        for meta_key, meta_value in metadata.items():
+            if meta_key.startswith("gen_ai."):
+                attributes[meta_key] = meta_value
 
         formatted_messages, system_instr = _prepare_messages(
             inputs.get("messages"),
@@ -646,16 +703,46 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         if system_instr:
             attributes[Attrs.SYSTEM_INSTRUCTIONS] = system_instr
 
-        span_name = f"invoke_agent {self._name}"
+        is_agent_span = bool(metadata.get("otel_agent_span"))
+        effective_parent_run_id = parent_run_id
         resolved_parent = self._resolve_parent_id(parent_run_id)
+        parent_record = self._spans.get(resolved_parent) if resolved_parent else None
+        if (
+            is_agent_span
+            and parent_record
+            and parent_record.operation == "invoke_agent"
+        ):
+            parent_agent_name = parent_record.attributes.get(Attrs.AGENT_NAME)
+            if parent_agent_name != attributes.get(Attrs.AGENT_NAME):
+                parent_override_key = parent_record.parent_run_id
+                if parent_override_key:
+                    try:
+                        effective_parent_run_id = UUID(parent_override_key)
+                    except (ValueError, TypeError, AttributeError):
+                        effective_parent_run_id = None
+                else:
+                    effective_parent_run_id = None
+                resolved_parent = self._resolve_parent_id(effective_parent_run_id)
+                parent_record = (
+                    self._spans.get(resolved_parent) if resolved_parent else None
+                )
+
+        span_name = f"invoke_agent {attributes[Attrs.AGENT_NAME]}"
         self._start_span(
             run_id,
             span_name,
             operation="invoke_agent",
             kind=SpanKind.CLIENT,
-            parent_run_id=parent_run_id,
+            parent_run_id=effective_parent_run_id,
             attributes=attributes,
         )
+        new_record = self._spans.get(run_key)
+        allowed_sources = metadata.get("otel_agent_span_allowed")
+        if new_record and allowed_sources:
+            try:
+                new_record.stash["allowed_agent_sources"] = set(allowed_sources)
+            except TypeError:
+                pass
         if formatted_messages:
             self._update_parent_attribute(
                 resolved_parent, Attrs.INPUT_MESSAGES, formatted_messages
