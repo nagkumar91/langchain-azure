@@ -60,14 +60,6 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 LOGGER = logging.getLogger(__name__)
-if os.getenv("AZURE_AI_TRACE_DEBUG"):
-    LOGGER.setLevel(logging.DEBUG)
-    if not LOGGER.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s")
-        )
-        LOGGER.addHandler(handler)
 
 
 class Attrs:
