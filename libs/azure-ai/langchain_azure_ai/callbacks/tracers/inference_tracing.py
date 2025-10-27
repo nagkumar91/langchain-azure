@@ -580,11 +580,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             meta_agent_name = metadata.get("agent_name") or metadata.get(
                 "agent_type"
             )
-            if (
-                node_name
-                and meta_agent_name
-                and str(node_name) != str(meta_agent_name)
-            ):
+            if node_name and meta_agent_name and str(node_name) != str(meta_agent_name):
                 return True
             return False
         if agent_name == "LangGraph":
