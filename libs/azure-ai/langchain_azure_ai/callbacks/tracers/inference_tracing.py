@@ -684,10 +684,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         for meta_key, meta_value in metadata.items():
             if meta_key.startswith("gen_ai."):
                 attributes[meta_key] = meta_value
-        if (
-            Attrs.PROVIDER_NAME not in attributes
-            and self._default_provider_name
-        ):
+        if Attrs.PROVIDER_NAME not in attributes and self._default_provider_name:
             attributes[Attrs.PROVIDER_NAME] = self._default_provider_name
 
         formatted_messages, system_instr = _prepare_messages(
