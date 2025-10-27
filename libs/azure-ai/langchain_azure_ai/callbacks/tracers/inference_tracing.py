@@ -545,10 +545,12 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         project_endpoint: Optional[str] = None,
         credential: Optional[Any] = None,
         name: str = "AzureAIOpenTelemetryTracer",
+        agent_id: Optional[str] = None,
     ) -> None:
         """Initialize tracer state and configure Azure Monitor if needed."""
         super().__init__()
         self._name = name
+        self._default_agent_id = agent_id
         self._content_recording = enable_content_recording
         self._tracer = otel_trace.get_tracer(name, schema_url=self._schema_url)
 
@@ -667,6 +669,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         agent_id = metadata.get("agent_id")
         if agent_id is not None:
             attributes[Attrs.AGENT_ID] = str(agent_id)
+        elif self._default_agent_id:
+            attributes[Attrs.AGENT_ID] = self._default_agent_id
         agent_description = metadata.get("agent_description")
         if agent_description:
             attributes[Attrs.AGENT_DESCRIPTION] = str(agent_description)
