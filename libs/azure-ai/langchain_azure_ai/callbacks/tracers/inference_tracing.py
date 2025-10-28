@@ -51,6 +51,7 @@ try:  # pragma: no cover - imported lazily in production environments
         StatusCode,
         get_current_span,
         set_span_in_context,
+        use_span,
     )
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
@@ -1314,12 +1315,16 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             kind=kind,
             attributes=attributes or {},
         )
-        self._spans[run_key] = _SpanRecord(
+        token = use_span(span, end_on_exit=False)
+        token.__enter__()
+        span_record = _SpanRecord(
             span=span,
             operation=operation,
             parent_run_id=resolved_parent_key,
             attributes=attributes or {},
         )
+        span_record.stash["span_context_token"] = token
+        self._spans[run_key] = span_record
         self._run_parent_override[run_key] = resolved_parent_key
         if resolved_parent_key and resolved_parent_key in self._spans:
             conv_id = self._spans[resolved_parent_key].attributes.get(
@@ -1344,6 +1349,9 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             record.span.set_attribute(Attrs.ERROR_TYPE, error.__class__.__name__)
         if status:
             record.span.set_status(status)
+        token = record.stash.pop("span_context_token", None)
+        if token:
+            token.__exit__(None, None, None)
         record.span.end()
         self._run_parent_override.pop(str(run_id), None)
 
