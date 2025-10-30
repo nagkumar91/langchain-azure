@@ -376,18 +376,19 @@ def _first_non_empty(*values: Any) -> Optional[Any]:
     return None
 
 
+def _coerce_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _extract_usage_tokens(
     token_usage: Any,
 ) -> tuple[Optional[int], Optional[int]]:
     """Return (input_tokens, output_tokens) from diverse usage payloads."""
-
-    def _coerce_int(value: Any) -> Optional[int]:
-        if value is None:
-            return None
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
 
     def _lookup(keys: Sequence[str]) -> Optional[int]:
         for key in keys:
@@ -645,6 +646,44 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_record.span.set_attribute(attr, value)
         parent_record.attributes[attr] = value
 
+    def _accumulate_usage_to_agent_spans(
+        self,
+        record: _SpanRecord,
+        input_tokens: Optional[int],
+        output_tokens: Optional[int],
+    ) -> None:
+        if input_tokens is None and output_tokens is None:
+            return
+
+        parent_key = record.parent_run_id
+        while parent_key:
+            parent_record = self._spans.get(parent_key)
+            if not parent_record:
+                break
+
+            if parent_record.operation == "invoke_agent":
+                if input_tokens is not None:
+                    existing_input = _coerce_int(
+                        parent_record.attributes.get(Attrs.USAGE_INPUT_TOKENS)
+                    )
+                    total_input = (existing_input or 0) + input_tokens
+                    parent_record.attributes[Attrs.USAGE_INPUT_TOKENS] = total_input
+                    parent_record.span.set_attribute(
+                        Attrs.USAGE_INPUT_TOKENS, total_input
+                    )
+
+                if output_tokens is not None:
+                    existing_output = _coerce_int(
+                        parent_record.attributes.get(Attrs.USAGE_OUTPUT_TOKENS)
+                    )
+                    total_output = (existing_output or 0) + output_tokens
+                    parent_record.attributes[Attrs.USAGE_OUTPUT_TOKENS] = total_output
+                    parent_record.span.set_attribute(
+                        Attrs.USAGE_OUTPUT_TOKENS, total_output
+                    )
+
+            parent_key = parent_record.parent_run_id
+
     # ---------------------------------------------------------------------
     # BaseCallbackHandler overrides
     # ---------------------------------------------------------------------
@@ -700,7 +739,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             attributes[Attrs.CONVERSATION_ID] = str(conversation_id)
         path = metadata.get("langgraph_path")
         if path:
-            attributes["metadata.langgraph_path"] = json.dumps(path, default=str)
+            attributes["metadata.langgraph_path"] = _as_json_attribute(path)
         for key in (
             Attrs.PROVIDER_NAME,
             Attrs.SERVER_ADDRESS,
@@ -741,7 +780,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                 if parent_override_key:
                     try:
                         effective_parent_run_id = UUID(parent_override_key)
-                    except (ValueError, TypeError, AttributeError):
+                    except (ValueError, TypeError):
                         effective_parent_run_id = None
                 else:
                     effective_parent_run_id = None
@@ -761,11 +800,17 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         )
         new_record = self._spans.get(run_key)
         allowed_sources = metadata.get("otel_agent_span_allowed")
-        if new_record and allowed_sources:
-            try:
-                new_record.stash["allowed_agent_sources"] = set(allowed_sources)
-            except TypeError:
-                pass
+        if new_record and allowed_sources is not None:
+            if isinstance(allowed_sources, str):
+                new_record.stash["allowed_agent_sources"] = {allowed_sources}
+            else:
+                try:
+                    new_record.stash["allowed_agent_sources"] = set(allowed_sources)
+                except TypeError:
+                    LOGGER.debug(
+                        "Ignoring non-iterable otel_agent_span_allowed metadata: %r",
+                        allowed_sources,
+                    )
         if formatted_messages:
             self._update_parent_attribute(
                 resolved_parent, Attrs.INPUT_MESSAGES, formatted_messages
@@ -950,8 +995,11 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             input_tokens, output_tokens = _extract_usage_tokens(token_usage)
             if input_tokens is not None:
                 record.span.set_attribute(Attrs.USAGE_INPUT_TOKENS, input_tokens)
+                record.attributes[Attrs.USAGE_INPUT_TOKENS] = input_tokens
             if output_tokens is not None:
                 record.span.set_attribute(Attrs.USAGE_OUTPUT_TOKENS, output_tokens)
+                record.attributes[Attrs.USAGE_OUTPUT_TOKENS] = output_tokens
+            self._accumulate_usage_to_agent_spans(record, input_tokens, output_tokens)
         if "id" in llm_output:
             record.span.set_attribute(Attrs.RESPONSE_ID, str(llm_output["id"]))
         if "model_name" in llm_output:
@@ -1342,7 +1390,12 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             attributes=attributes or {},
         )
         token = use_span(span, end_on_exit=False)
-        token.__enter__()
+        try:
+            token.__enter__()
+        except Exception:
+            token.__exit__(None, None, None)
+            span.end()
+            raise
         span_record = _SpanRecord(
             span=span,
             operation=operation,

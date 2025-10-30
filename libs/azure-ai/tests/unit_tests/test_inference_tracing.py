@@ -224,9 +224,7 @@ def test_usage_and_response_metadata() -> None:
     assert attrs.get(tracing.Attrs.RESPONSE_MODEL) == "m"
     assert attrs.get(tracing.Attrs.RESPONSE_ID) == "resp-123"
     assert attrs.get(tracing.Attrs.OPENAI_RESPONSE_SERVICE_TIER) == "standard"
-    assert (
-        attrs.get(tracing.Attrs.OPENAI_RESPONSE_SYSTEM_FINGERPRINT) == "fingerprint"
-    )
+    assert attrs.get(tracing.Attrs.OPENAI_RESPONSE_SYSTEM_FINGERPRINT) == "fingerprint"
 
 
 def test_usage_metadata_input_output_keys() -> None:
@@ -367,10 +365,56 @@ def test_inference_span_records_gen_ai_semantic_attributes() -> None:
     assert attrs.get(tracing.Attrs.RESPONSE_MODEL) == "gpt-4o"
     assert attrs.get(tracing.Attrs.USAGE_INPUT_TOKENS) == 42
     assert attrs.get(tracing.Attrs.USAGE_OUTPUT_TOKENS) == 17
-    assert (
-        attrs.get(tracing.Attrs.OPENAI_RESPONSE_SYSTEM_FINGERPRINT) == "fp-123"
-    )
+    assert attrs.get(tracing.Attrs.OPENAI_RESPONSE_SYSTEM_FINGERPRINT) == "fp-123"
     assert attrs.get(tracing.Attrs.OPENAI_RESPONSE_SERVICE_TIER) == "premium"
+
+
+def test_agent_span_accumulates_usage_tokens() -> None:
+    t = tracing.AzureAIOpenTelemetryTracer()
+    agent_run = uuid4()
+    t.on_chain_start(
+        {},
+        {"messages": [{"role": "user", "content": "plan trip"}]},
+        run_id=agent_run,
+        metadata={"otel_agent_span": True, "agent_name": "Coordinator"},
+    )
+
+    llm_run_one = uuid4()
+    prompts = cast(List[str], [{"role": "user", "content": "hello"}])
+    t.on_llm_start(
+        {"kwargs": {"model": "gpt-4o"}},
+        prompts,
+        run_id=llm_run_one,
+        parent_run_id=agent_run,
+        invocation_params={"model": "gpt-4o"},
+    )
+    gen_one = ChatGeneration(message=AIMessage(content="first"))
+    result_one = LLMResult(
+        generations=[[gen_one]],
+        llm_output={"token_usage": {"input_tokens": 5, "output_tokens": 2}},
+    )
+    t.on_llm_end(result_one, run_id=llm_run_one, parent_run_id=agent_run)
+
+    llm_run_two = uuid4()
+    t.on_llm_start(
+        {"kwargs": {"model": "gpt-4o"}},
+        prompts,
+        run_id=llm_run_two,
+        parent_run_id=agent_run,
+        invocation_params={"model": "gpt-4o"},
+    )
+    gen_two = ChatGeneration(message=AIMessage(content="second"))
+    result_two = LLMResult(
+        generations=[[gen_two]],
+        llm_output={"token_usage": {"input_tokens": 7, "output_tokens": 4}},
+    )
+    t.on_llm_end(result_two, run_id=llm_run_two, parent_run_id=agent_run)
+
+    agent_record = t._spans[str(agent_run)]
+    agent_span = cast(MockSpan, agent_record.span)
+    attrs = agent_span.attributes
+    assert attrs.get(tracing.Attrs.USAGE_INPUT_TOKENS) == 12
+    assert attrs.get(tracing.Attrs.USAGE_OUTPUT_TOKENS) == 6
 
 
 def test_streaming_token_event(monkeypatch: pytest.MonkeyPatch) -> None:
