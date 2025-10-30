@@ -86,6 +86,7 @@ class Attrs:
     RESPONSE_FINISH_REASONS = "gen_ai.response.finish_reasons"
     USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
     USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
+    USAGE_TOTAL_TOKENS = "gen_ai.usage.total_tokens"
     INPUT_MESSAGES = "gen_ai.input.messages"
     OUTPUT_MESSAGES = "gen_ai.output.messages"
     SYSTEM_INSTRUCTIONS = "gen_ai.system_instructions"
@@ -387,8 +388,8 @@ def _coerce_int(value: Any) -> Optional[int]:
 
 def _extract_usage_tokens(
     token_usage: Any,
-) -> tuple[Optional[int], Optional[int]]:
-    """Return (input_tokens, output_tokens) from diverse usage payloads."""
+) -> tuple[Optional[int], Optional[int], Optional[int]]:
+    """Return (input_tokens, output_tokens, total_tokens) from diverse usage payloads."""
 
     def _lookup(keys: Sequence[str]) -> Optional[int]:
         for key in keys:
@@ -402,6 +403,7 @@ def _extract_usage_tokens(
     return (
         _lookup(("prompt_tokens", "input_tokens")),
         _lookup(("completion_tokens", "output_tokens")),
+        _lookup(("total_tokens",)),
     )
 
 
@@ -545,6 +547,7 @@ def _tool_type_from_definition(defn: dict[str, Any]) -> Optional[str]:
 
 @dataclass
 class _SpanRecord:
+    run_id: str
     span: Span
     operation: str
     parent_run_id: Optional[str]
@@ -592,6 +595,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         self._lock = Lock()
         self._ignored_runs: set[str] = set()
         self._run_parent_override: Dict[str, Optional[str]] = {}
+        self._langgraph_root_by_thread: Dict[str, str] = {}
 
     def _should_ignore_agent_span(
         self,
@@ -651,38 +655,182 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         record: _SpanRecord,
         input_tokens: Optional[int],
         output_tokens: Optional[int],
+        total_tokens: Optional[int],
     ) -> None:
-        if input_tokens is None and output_tokens is None:
+        if input_tokens is None and output_tokens is None and total_tokens is None:
             return
 
-        parent_key = record.parent_run_id
+        thread_key = record.stash.get("thread_id")
+        parent_key = record.parent_run_id or self._run_parent_override.get(
+            record.run_id
+        )
+        if not parent_key and thread_key:
+            potential_parent = self._langgraph_root_by_thread.get(str(thread_key))
+            if potential_parent and potential_parent != record.run_id:
+                parent_key = potential_parent
+        visited: set[str] = set()
         while parent_key:
+            if parent_key in visited:
+                break
+            visited.add(parent_key)
             parent_record = self._spans.get(parent_key)
             if not parent_record:
                 break
 
             if parent_record.operation == "invoke_agent":
+                existing_input = _coerce_int(
+                    parent_record.attributes.get(Attrs.USAGE_INPUT_TOKENS)
+                )
+                existing_output = _coerce_int(
+                    parent_record.attributes.get(Attrs.USAGE_OUTPUT_TOKENS)
+                )
+                existing_total = _coerce_int(
+                    parent_record.attributes.get(Attrs.USAGE_TOTAL_TOKENS)
+                )
+
+                delta_input: Optional[int] = None
                 if input_tokens is not None:
-                    existing_input = _coerce_int(
-                        parent_record.attributes.get(Attrs.USAGE_INPUT_TOKENS)
-                    )
-                    total_input = (existing_input or 0) + input_tokens
-                    parent_record.attributes[Attrs.USAGE_INPUT_TOKENS] = total_input
+                    updated_input = (existing_input or 0) + input_tokens
+                    parent_record.attributes[Attrs.USAGE_INPUT_TOKENS] = updated_input
                     parent_record.span.set_attribute(
-                        Attrs.USAGE_INPUT_TOKENS, total_input
+                        Attrs.USAGE_INPUT_TOKENS, updated_input
                     )
+                    delta_input = input_tokens
+                else:
+                    updated_input = existing_input
 
+                delta_output: Optional[int] = None
                 if output_tokens is not None:
-                    existing_output = _coerce_int(
-                        parent_record.attributes.get(Attrs.USAGE_OUTPUT_TOKENS)
-                    )
-                    total_output = (existing_output or 0) + output_tokens
-                    parent_record.attributes[Attrs.USAGE_OUTPUT_TOKENS] = total_output
+                    updated_output = (existing_output or 0) + output_tokens
+                    parent_record.attributes[Attrs.USAGE_OUTPUT_TOKENS] = updated_output
                     parent_record.span.set_attribute(
-                        Attrs.USAGE_OUTPUT_TOKENS, total_output
+                        Attrs.USAGE_OUTPUT_TOKENS, updated_output
+                    )
+                    delta_output = output_tokens
+                else:
+                    updated_output = existing_output
+
+                updated_total: Optional[int]
+                delta_total: Optional[int] = None
+                if total_tokens is not None:
+                    updated_total = (existing_total or 0) + total_tokens
+                    delta_total = total_tokens
+                else:
+                    if updated_input is None and updated_output is None:
+                        updated_total = existing_total
+                    else:
+                        inferred_total = (updated_input or 0) + (updated_output or 0)
+                        if (
+                            existing_total is not None
+                            and inferred_total == existing_total
+                        ):
+                            updated_total = existing_total
+                        else:
+                            updated_total = inferred_total
+                            delta_total = (
+                                inferred_total - (existing_total or 0)
+                                if existing_total is not None
+                                else inferred_total
+                            )
+
+                if updated_total is not None:
+                    parent_record.attributes[Attrs.USAGE_TOTAL_TOKENS] = updated_total
+                    parent_record.span.set_attribute(
+                        Attrs.USAGE_TOTAL_TOKENS, updated_total
                     )
 
-            parent_key = parent_record.parent_run_id
+                propagated_usage = parent_record.stash.setdefault(
+                    "child_usage_propagated",
+                    {"input": 0, "output": 0, "total": 0},
+                )
+                if delta_input:
+                    propagated_usage["input"] = (
+                        _coerce_int(propagated_usage.get("input")) or 0
+                    ) + delta_input
+                if delta_output:
+                    propagated_usage["output"] = (
+                        _coerce_int(propagated_usage.get("output")) or 0
+                    ) + delta_output
+                if delta_total:
+                    propagated_usage["total"] = (
+                        _coerce_int(propagated_usage.get("total")) or 0
+                    ) + delta_total
+
+            parent_key = parent_record.parent_run_id or self._run_parent_override.get(
+                parent_record.run_id
+            )
+            if not parent_key and thread_key:
+                potential_parent = self._langgraph_root_by_thread.get(str(thread_key))
+                if potential_parent and potential_parent not in visited:
+                    parent_key = potential_parent
+
+    def _propagate_agent_usage_totals(self, record: _SpanRecord) -> None:
+        if record.operation != "invoke_agent":
+            return
+        parent_key = record.parent_run_id or self._run_parent_override.get(
+            record.run_id
+        )
+        if not parent_key:
+            thread_key = record.stash.get("thread_id")
+            if thread_key:
+                potential_parent = self._langgraph_root_by_thread.get(str(thread_key))
+                if potential_parent and potential_parent != record.run_id:
+                    parent_key = potential_parent
+        if not parent_key:
+            return
+        total_input = _coerce_int(record.attributes.get(Attrs.USAGE_INPUT_TOKENS))
+        total_output = _coerce_int(record.attributes.get(Attrs.USAGE_OUTPUT_TOKENS))
+        total_tokens = _coerce_int(record.attributes.get(Attrs.USAGE_TOTAL_TOKENS))
+
+        propagated = record.stash.get("child_usage_propagated") or {}
+        propagated_input = _coerce_int(propagated.get("input")) or 0
+        propagated_output = _coerce_int(propagated.get("output")) or 0
+        propagated_total = _coerce_int(propagated.get("total")) or 0
+
+        delta_input: Optional[int] = None
+        if total_input is not None:
+            remaining_input = total_input - propagated_input
+            if remaining_input > 0:
+                delta_input = remaining_input
+
+        delta_output: Optional[int] = None
+        if total_output is not None:
+            remaining_output = total_output - propagated_output
+            if remaining_output > 0:
+                delta_output = remaining_output
+
+        delta_total: Optional[int] = None
+        if total_tokens is not None:
+            remaining_total = total_tokens - propagated_total
+            if remaining_total > 0:
+                delta_total = remaining_total
+        else:
+            if total_input is not None or total_output is not None:
+                inferred_total = (total_input or 0) + (total_output or 0)
+                remaining_total = inferred_total - propagated_total
+                if remaining_total > 0:
+                    delta_total = remaining_total
+
+        if delta_input is None and delta_output is None and delta_total is None:
+            return
+
+        self._accumulate_usage_to_agent_spans(
+            record, delta_input, delta_output, delta_total
+        )
+
+        record.stash["child_usage_propagated"] = {
+            "input": total_input if total_input is not None else propagated_input,
+            "output": total_output if total_output is not None else propagated_output,
+            "total": (
+                total_tokens
+                if total_tokens is not None
+                else (
+                    (total_input or 0) + (total_output or 0)
+                    if total_input is not None or total_output is not None
+                    else propagated_total
+                )
+            ),
+        }
 
     # ---------------------------------------------------------------------
     # BaseCallbackHandler overrides
@@ -730,13 +878,14 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         agent_description = metadata.get("agent_description")
         if agent_description:
             attributes[Attrs.AGENT_DESCRIPTION] = str(agent_description)
-        conversation_id = _first_non_empty(
+        thread_identifier = _first_non_empty(
             metadata.get("thread_id"),
             metadata.get("session_id"),
             metadata.get("conversation_id"),
         )
-        if conversation_id:
-            attributes[Attrs.CONVERSATION_ID] = str(conversation_id)
+        thread_key = str(thread_identifier) if thread_identifier else None
+        if thread_key:
+            attributes[Attrs.CONVERSATION_ID] = thread_key
         path = metadata.get("langgraph_path")
         if path:
             attributes["metadata.langgraph_path"] = _as_json_attribute(path)
@@ -768,6 +917,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         is_agent_span = bool(metadata.get("otel_agent_span"))
         effective_parent_run_id = parent_run_id
         resolved_parent = self._resolve_parent_id(parent_run_id)
+        original_resolved_parent = resolved_parent
         parent_record = self._spans.get(resolved_parent) if resolved_parent else None
         if (
             is_agent_span
@@ -811,6 +961,19 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                         "Ignoring non-iterable otel_agent_span_allowed metadata: %r",
                         allowed_sources,
                     )
+        if new_record:
+            if thread_key:
+                new_record.stash["thread_id"] = thread_key
+                if (
+                    not is_agent_span
+                    and new_record.parent_run_id is None
+                    and thread_key not in self._langgraph_root_by_thread
+                ):
+                    self._langgraph_root_by_thread[thread_key] = run_key
+        if new_record and original_resolved_parent and (
+            new_record.parent_run_id != original_resolved_parent
+        ):
+            self._run_parent_override[run_key] = original_resolved_parent
         if formatted_messages:
             self._update_parent_attribute(
                 resolved_parent, Attrs.INPUT_MESSAGES, formatted_messages
@@ -841,6 +1004,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         record = self._spans.get(run_key)
         if not record:
             return
+        thread_key = record.stash.get("thread_id")
         try:
             messages_payload: Any
             if isinstance(outputs, dict):
@@ -869,6 +1033,13 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         except Exception as exc:  # pragma: no cover - defensive
             LOGGER.debug("Failed to serialise chain outputs: %s", exc, exc_info=True)
         record.span.set_status(Status(status_code=StatusCode.OK))
+        self._propagate_agent_usage_totals(record)
+        if (
+            record.operation == "invoke_agent"
+            and thread_key
+            and self._langgraph_root_by_thread.get(str(thread_key)) == run_key
+        ):
+            self._langgraph_root_by_thread.pop(str(thread_key), None)
         self._end_span(run_id)
 
     def on_chain_error(
@@ -885,11 +1056,22 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             self._ignored_runs.remove(run_key)
             self._run_parent_override.pop(run_key, None)
             return
+        record = self._spans.get(run_key)
+        thread_key = record.stash.get("thread_id") if record else None
+        if record:
+            self._propagate_agent_usage_totals(record)
         self._end_span(
             run_id,
             status=Status(StatusCode.ERROR, str(error)),
             error=error,
         )
+        if (
+            record
+            and record.operation == "invoke_agent"
+            and thread_key
+            and self._langgraph_root_by_thread.get(str(thread_key)) == run_key
+        ):
+            self._langgraph_root_by_thread.pop(str(thread_key), None)
 
     def on_chat_model_start(
         self,
@@ -992,14 +1174,27 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         llm_output = getattr(response, "llm_output", {}) or {}
         token_usage = llm_output.get("token_usage")
         if token_usage:
-            input_tokens, output_tokens = _extract_usage_tokens(token_usage)
+            (
+                input_tokens,
+                output_tokens,
+                total_tokens,
+            ) = _extract_usage_tokens(token_usage)
             if input_tokens is not None:
                 record.span.set_attribute(Attrs.USAGE_INPUT_TOKENS, input_tokens)
                 record.attributes[Attrs.USAGE_INPUT_TOKENS] = input_tokens
             if output_tokens is not None:
                 record.span.set_attribute(Attrs.USAGE_OUTPUT_TOKENS, output_tokens)
                 record.attributes[Attrs.USAGE_OUTPUT_TOKENS] = output_tokens
-            self._accumulate_usage_to_agent_spans(record, input_tokens, output_tokens)
+            if total_tokens is None and (
+                input_tokens is not None or output_tokens is not None
+            ):
+                total_tokens = (input_tokens or 0) + (output_tokens or 0)
+            if total_tokens is not None:
+                record.span.set_attribute(Attrs.USAGE_TOTAL_TOKENS, total_tokens)
+                record.attributes[Attrs.USAGE_TOTAL_TOKENS] = total_tokens
+            self._accumulate_usage_to_agent_spans(
+                record, input_tokens, output_tokens, total_tokens
+            )
         if "id" in llm_output:
             record.span.set_attribute(Attrs.RESPONSE_ID, str(llm_output["id"]))
         if "model_name" in llm_output:
@@ -1168,6 +1363,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                 Attrs.OUTPUT_MESSAGES, _as_json_attribute(finish.return_values)
             )
         record.span.set_status(Status(StatusCode.OK))
+        self._propagate_agent_usage_totals(record)
         self._end_span(run_id)
 
     def on_retriever_start(
@@ -1253,6 +1449,13 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         is_chat_model: bool,
     ) -> None:
         invocation_params = invocation_kwargs.get("invocation_params") or {}
+        metadata = metadata or {}
+        thread_identifier = _first_non_empty(
+            metadata.get("thread_id"),
+            metadata.get("session_id"),
+            metadata.get("conversation_id"),
+        )
+        thread_key = str(thread_identifier) if thread_identifier else None
         model_name = _first_non_empty(
             invocation_params.get("model"),
             invocation_params.get("model_name"),
@@ -1332,6 +1535,9 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             parent_run_id=parent_run_id,
             attributes=attributes,
         )
+        span_record = self._spans.get(str(run_id))
+        if span_record and thread_key:
+            span_record.stash["thread_id"] = thread_key
         if provider:
             self._update_parent_attribute(
                 resolved_parent, Attrs.PROVIDER_NAME, provider
@@ -1397,6 +1603,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             span.end()
             raise
         span_record = _SpanRecord(
+            run_id=run_key,
             span=span,
             operation=operation,
             parent_run_id=resolved_parent_key,
