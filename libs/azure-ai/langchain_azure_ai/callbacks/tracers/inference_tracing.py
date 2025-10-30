@@ -688,6 +688,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                     parent_record.attributes.get(Attrs.USAGE_TOTAL_TOKENS)
                 )
 
+                updated_input: Optional[int] = existing_input
                 delta_input: Optional[int] = None
                 if input_tokens is not None:
                     updated_input = (existing_input or 0) + input_tokens
@@ -696,9 +697,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                         Attrs.USAGE_INPUT_TOKENS, updated_input
                     )
                     delta_input = input_tokens
-                else:
-                    updated_input = existing_input
 
+                updated_output: Optional[int] = existing_output
                 delta_output: Optional[int] = None
                 if output_tokens is not None:
                     updated_output = (existing_output or 0) + output_tokens
@@ -707,8 +707,6 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                         Attrs.USAGE_OUTPUT_TOKENS, updated_output
                     )
                     delta_output = output_tokens
-                else:
-                    updated_output = existing_output
 
                 updated_total: Optional[int]
                 delta_total: Optional[int] = None
