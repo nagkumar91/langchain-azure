@@ -970,8 +970,10 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                     and thread_key not in self._langgraph_root_by_thread
                 ):
                     self._langgraph_root_by_thread[thread_key] = run_key
-        if new_record and original_resolved_parent and (
-            new_record.parent_run_id != original_resolved_parent
+        if (
+            new_record
+            and original_resolved_parent
+            and (new_record.parent_run_id != original_resolved_parent)
         ):
             self._run_parent_override[run_key] = original_resolved_parent
         if formatted_messages:
