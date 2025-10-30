@@ -224,7 +224,153 @@ def test_usage_and_response_metadata() -> None:
     assert attrs.get(tracing.Attrs.RESPONSE_MODEL) == "m"
     assert attrs.get(tracing.Attrs.RESPONSE_ID) == "resp-123"
     assert attrs.get(tracing.Attrs.OPENAI_RESPONSE_SERVICE_TIER) == "standard"
-    assert attrs.get(tracing.Attrs.OPENAI_RESPONSE_SYSTEM_FINGERPRINT) == "fingerprint"
+    assert (
+        attrs.get(tracing.Attrs.OPENAI_RESPONSE_SYSTEM_FINGERPRINT) == "fingerprint"
+    )
+
+
+def test_usage_metadata_input_output_keys() -> None:
+    t = tracing.AzureAIOpenTelemetryTracer()
+    run_id = uuid4()
+    serialized = {"kwargs": {"model": "m"}}
+    prompts = cast(List[str], [{"role": "user", "content": "hello"}])
+    t.on_llm_start(
+        serialized,
+        prompts,
+        run_id=run_id,
+        invocation_params={"model": "m"},
+    )
+    gen = ChatGeneration(message=AIMessage(content="ok"))
+    result = LLMResult(
+        generations=[[gen]],
+        llm_output={"token_usage": {"input_tokens": "7", "output_tokens": "11"}},
+    )
+    t.on_llm_end(result, run_id=run_id)
+    span = get_last_span_for(t)
+    attrs = span.attributes
+    assert attrs.get(tracing.Attrs.USAGE_INPUT_TOKENS) == 7
+    assert attrs.get(tracing.Attrs.USAGE_OUTPUT_TOKENS) == 11
+
+
+def test_inference_span_records_gen_ai_semantic_attributes() -> None:
+    t = tracing.AzureAIOpenTelemetryTracer(enable_content_recording=True)
+    root_run = uuid4()
+    conversation_id = "thread-123"
+    base_messages = [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Tell me a joke."},
+    ]
+    t.on_chain_start(
+        {},
+        {"messages": base_messages},
+        run_id=root_run,
+        metadata={"thread_id": conversation_id, "agent_name": "Comedian"},
+    )
+
+    llm_run = uuid4()
+    invocation_params = {
+        "model": "gpt-4o",
+        "max_tokens": 128,
+        "max_input_tokens": 256,
+        "max_output_tokens": 64,
+        "temperature": 0.1,
+        "top_p": 0.9,
+        "top_k": 20,
+        "frequency_penalty": 0.5,
+        "presence_penalty": 0.1,
+        "n": 2,
+        "seed": 123,
+        "stop": ["stop"],
+        "response_format": {"type": "json_object"},
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Weather lookup",
+                },
+            }
+        ],
+        "base_url": "https://api.example.com:8443/v1",
+        "service_tier": "standard",
+    }
+    serialized = {
+        "kwargs": {
+            "model": "gpt-4o",
+            "openai_api_base": "https://api.example.com:8443/v1",
+        }
+    }
+    prompts = cast(List[str], base_messages)
+    t.on_llm_start(
+        serialized,
+        prompts,
+        run_id=llm_run,
+        parent_run_id=root_run,
+        metadata={"ls_provider": "openai"},
+        invocation_params=invocation_params,
+    )
+
+    generation = ChatGeneration(
+        message=AIMessage(content="Here is a funny line."),
+        generation_info={"finish_reason": "stop"},
+    )
+    result = LLMResult(
+        generations=[[generation]],
+        llm_output={
+            "token_usage": {"input_tokens": 42, "output_tokens": 17},
+            "model_name": "gpt-4o",
+            "id": "resp-456",
+            "system_fingerprint": "fp-123",
+            "service_tier": "premium",
+        },
+    )
+    t.on_llm_end(result, run_id=llm_run)
+
+    span = get_last_span_for(t)
+    attrs = span.attributes
+
+    assert span.name == "text_completion gpt-4o"
+    assert attrs.get(tracing.Attrs.OPERATION_NAME) == "text_completion"
+    assert attrs.get(tracing.Attrs.PROVIDER_NAME) == "openai"
+    assert attrs.get(tracing.Attrs.REQUEST_MODEL) == "gpt-4o"
+    assert attrs.get(tracing.Attrs.SERVER_ADDRESS) == "api.example.com"
+    assert attrs.get(tracing.Attrs.SERVER_PORT) == 8443
+    assert attrs.get(tracing.Attrs.REQUEST_MAX_TOKENS) == 128
+    assert attrs.get(tracing.Attrs.REQUEST_MAX_INPUT_TOKENS) == 256
+    assert attrs.get(tracing.Attrs.REQUEST_MAX_OUTPUT_TOKENS) == 64
+    assert attrs.get(tracing.Attrs.REQUEST_TEMPERATURE) == 0.1
+    assert attrs.get(tracing.Attrs.REQUEST_TOP_P) == 0.9
+    assert attrs.get(tracing.Attrs.REQUEST_TOP_K) == 20
+    assert attrs.get(tracing.Attrs.REQUEST_FREQ_PENALTY) == 0.5
+    assert attrs.get(tracing.Attrs.REQUEST_PRES_PENALTY) == 0.1
+    assert attrs.get(tracing.Attrs.REQUEST_CHOICE_COUNT) == 2
+    assert attrs.get(tracing.Attrs.REQUEST_SEED) == 123
+    assert attrs.get(tracing.Attrs.OPENAI_REQUEST_SERVICE_TIER) == "standard"
+    assert attrs.get(tracing.Attrs.CONVERSATION_ID) == conversation_id
+
+    assert json.loads(attrs[tracing.Attrs.REQUEST_STOP]) == ["stop"]
+    assert json.loads(attrs[tracing.Attrs.REQUEST_ENCODING_FORMATS]) == {
+        "type": "json_object"
+    }
+    system_instr = json.loads(attrs[tracing.Attrs.SYSTEM_INSTRUCTIONS])
+    assert system_instr[0]["content"] == "You are a helpful assistant."
+    input_messages = json.loads(attrs[tracing.Attrs.INPUT_MESSAGES])
+    assert input_messages[0]["parts"][0]["content"] == "Tell me a joke."
+    tool_defs = json.loads(attrs[tracing.Attrs.TOOL_DEFINITIONS])
+    assert tool_defs[0]["function"]["name"] == "get_weather"
+
+    assert attrs.get(tracing.Attrs.OUTPUT_TYPE) == "text"
+    output_messages = json.loads(attrs[tracing.Attrs.OUTPUT_MESSAGES])
+    assert output_messages[0]["parts"][0]["content"] == "Here is a funny line."
+    assert json.loads(attrs[tracing.Attrs.RESPONSE_FINISH_REASONS]) == ["stop"]
+    assert attrs.get(tracing.Attrs.RESPONSE_ID) == "resp-456"
+    assert attrs.get(tracing.Attrs.RESPONSE_MODEL) == "gpt-4o"
+    assert attrs.get(tracing.Attrs.USAGE_INPUT_TOKENS) == 42
+    assert attrs.get(tracing.Attrs.USAGE_OUTPUT_TOKENS) == 17
+    assert (
+        attrs.get(tracing.Attrs.OPENAI_RESPONSE_SYSTEM_FINGERPRINT) == "fp-123"
+    )
+    assert attrs.get(tracing.Attrs.OPENAI_RESPONSE_SERVICE_TIER) == "premium"
 
 
 def test_streaming_token_event(monkeypatch: pytest.MonkeyPatch) -> None:

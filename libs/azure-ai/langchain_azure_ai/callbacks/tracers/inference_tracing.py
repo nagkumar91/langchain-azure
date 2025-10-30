@@ -376,6 +376,34 @@ def _first_non_empty(*values: Any) -> Optional[Any]:
     return None
 
 
+def _extract_usage_tokens(
+    token_usage: Any,
+) -> tuple[Optional[int], Optional[int]]:
+    """Return (input_tokens, output_tokens) from diverse usage payloads."""
+
+    def _coerce_int(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    def _lookup(keys: Sequence[str]) -> Optional[int]:
+        for key in keys:
+            if isinstance(token_usage, dict) and key in token_usage:
+                return _coerce_int(token_usage[key])
+            attr = getattr(token_usage, key, None)
+            if attr is not None:
+                return _coerce_int(attr)
+        return None
+
+    return (
+        _lookup(("prompt_tokens", "input_tokens")),
+        _lookup(("completion_tokens", "output_tokens")),
+    )
+
+
 def _infer_provider_name(
     serialized: Optional[dict[str, Any]],
     metadata: Optional[dict[str, Any]],
@@ -917,15 +945,13 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             )
 
         llm_output = getattr(response, "llm_output", {}) or {}
-        token_usage = llm_output.get("token_usage") or {}
-        if "prompt_tokens" in token_usage:
-            record.span.set_attribute(
-                Attrs.USAGE_INPUT_TOKENS, int(token_usage["prompt_tokens"])
-            )
-        if "completion_tokens" in token_usage:
-            record.span.set_attribute(
-                Attrs.USAGE_OUTPUT_TOKENS, int(token_usage["completion_tokens"])
-            )
+        token_usage = llm_output.get("token_usage")
+        if token_usage:
+            input_tokens, output_tokens = _extract_usage_tokens(token_usage)
+            if input_tokens is not None:
+                record.span.set_attribute(Attrs.USAGE_INPUT_TOKENS, input_tokens)
+            if output_tokens is not None:
+                record.span.set_attribute(Attrs.USAGE_OUTPUT_TOKENS, output_tokens)
         if "id" in llm_output:
             record.span.set_attribute(Attrs.RESPONSE_ID, str(llm_output["id"]))
         if "model_name" in llm_output:
