@@ -389,7 +389,7 @@ def _coerce_int(value: Any) -> Optional[int]:
 def _extract_usage_tokens(
     token_usage: Any,
 ) -> tuple[Optional[int], Optional[int], Optional[int]]:
-    """Return (input_tokens, output_tokens, total_tokens) from diverse usage payloads."""
+    """Return (input_tokens, output_tokens, total_tokens) from usage payloads."""
 
     def _lookup(keys: Sequence[str]) -> Optional[int]:
         for key in keys:
@@ -982,9 +982,9 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             self._update_parent_attribute(
                 resolved_parent, Attrs.SYSTEM_INSTRUCTIONS, system_instr
             )
-        if conversation_id:
+        if thread_key:
             self._update_parent_attribute(
-                resolved_parent, Attrs.CONVERSATION_ID, str(conversation_id)
+                resolved_parent, Attrs.CONVERSATION_ID, thread_key
             )
 
     def on_chain_end(
