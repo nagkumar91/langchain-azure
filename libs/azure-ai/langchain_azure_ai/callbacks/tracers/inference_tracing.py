@@ -354,6 +354,29 @@ def _format_tool_definitions(definitions: Optional[Iterable[Any]]) -> Optional[s
     return _as_json_attribute(list(definitions))
 
 
+def _collect_tool_definitions(*candidates: Any) -> list[dict[str, Any]]:
+    collected: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if isinstance(candidate, dict):
+            iterable: Iterable[Any] = [candidate]
+        elif isinstance(candidate, (list, tuple, set)):
+            iterable = candidate
+        else:
+            continue
+        for item in iterable:
+            if not item or not isinstance(item, dict):
+                continue
+            marker = id(item)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            collected.append(item)
+    return collected
+
+
 def _format_documents(
     documents: Optional[Sequence[Document]],
     *,
@@ -375,6 +398,56 @@ def _first_non_empty(*values: Any) -> Optional[Any]:
         if value:
             return value
     return None
+
+
+def _candidate_from_serialized_id(value: Any) -> Optional[str]:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        for item in reversed(value):
+            if item:
+                return str(item)
+    if value is not None:
+        return str(value)
+    return None
+
+
+def _resolve_agent_name(
+    *,
+    serialized: Optional[dict[str, Any]],
+    metadata: dict[str, Any],
+    callback_kwargs: dict[str, Any],
+    default: str,
+) -> str:
+    serialized = serialized or {}
+    candidate = _first_non_empty(
+        metadata.get("agent_name"),
+        metadata.get("langgraph_node"),
+        metadata.get("agent_type"),
+        callback_kwargs.get("name"),
+    )
+    resolved = str(candidate) if candidate else None
+
+    generic_markers = {
+        "",
+        "LangGraph",
+        default,
+    }
+    if resolved is None or resolved.strip() in generic_markers:
+        path = metadata.get("langgraph_path")
+        if isinstance(path, (list, tuple)) and path:
+            resolved = str(path[-1])
+
+    if resolved is None or resolved.strip() in generic_markers:
+        candidate_from_serialized = _candidate_from_serialized_id(
+            serialized.get("id")
+        ) or _candidate_from_serialized_id(serialized.get("name"))
+        if candidate_from_serialized:
+            resolved = candidate_from_serialized
+
+    if resolved is None or resolved.strip() == "":
+        resolved = default
+    return resolved
 
 
 def _coerce_int(value: Any) -> Optional[int]:
@@ -603,19 +676,36 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID],
         metadata: Optional[dict[str, Any]],
     ) -> bool:
-        if metadata and metadata.get("otel_agent_span"):
-            node_name = metadata.get("langgraph_node")
-            meta_agent_name = metadata.get("agent_name") or metadata.get("agent_type")
-            if node_name and meta_agent_name and str(node_name) != str(meta_agent_name):
-                return True
+        metadata = metadata or {}
+        node_name = metadata.get("langgraph_node")
+        if node_name == "__start__":
+            return True
+        if "otel_agent_span" in metadata:
+            if metadata.get("otel_agent_span"):
+                meta_agent_name = metadata.get("agent_name") or metadata.get(
+                    "agent_type"
+                )
+                if (
+                    node_name
+                    and meta_agent_name
+                    and str(node_name) != str(meta_agent_name)
+                ):
+                    return True
+                return False
+            return True
+        if agent_name and "Middleware." in agent_name:
+            return True
+        if parent_run_id is None:
+            return False
+        if metadata.get("langgraph_node") or metadata.get("agent_name"):
+            return False
+        if metadata.get("agent_type"):
             return False
         if agent_name == "LangGraph":
             return False
-        if parent_run_id is None:
+        if agent_name:
             return False
-        if agent_name and "Middleware." in agent_name:
-            return True
-        return True
+        return False
 
     def _resolve_parent_id(self, parent_run_id: Optional[UUID]) -> Optional[str]:
         if parent_run_id is None:
@@ -846,25 +936,28 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
     ) -> Any:
         """Handle start of a chain/agent invocation."""
         metadata = metadata or {}
-        agent_name = _first_non_empty(
+        agent_hint = _first_non_empty(
             metadata.get("agent_name"),
-            metadata.get("agent_type"),
             metadata.get("langgraph_node"),
+            metadata.get("agent_type"),
             kwargs.get("name"),
         )
         run_key = str(run_id)
         parent_key = str(parent_run_id) if parent_run_id else None
-        if self._should_ignore_agent_span(agent_name, parent_run_id, metadata):
+        if self._should_ignore_agent_span(agent_hint, parent_run_id, metadata):
             self._ignored_runs.add(run_key)
             self._run_parent_override[run_key] = parent_key
             return
         attributes: Dict[str, Any] = {
             Attrs.OPERATION_NAME: "invoke_agent",
         }
-        if agent_name:
-            attributes[Attrs.AGENT_NAME] = str(agent_name)
-        else:
-            attributes[Attrs.AGENT_NAME] = self._name
+        resolved_agent_name = _resolve_agent_name(
+            serialized=serialized,
+            metadata=metadata,
+            callback_kwargs=kwargs,
+            default=self._name,
+        )
+        attributes[Attrs.AGENT_NAME] = resolved_agent_name
         node_label = metadata.get("langgraph_node")
         if node_label:
             attributes["metadata.langgraph_node"] = str(node_label)
@@ -1507,7 +1600,17 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         if system_instr:
             attributes[Attrs.SYSTEM_INSTRUCTIONS] = system_instr
 
-        tool_definitions = invocation_params.get("tools")
+        serialized_kwargs = serialized.get("kwargs") or {}
+        if not isinstance(serialized_kwargs, dict):
+            serialized_kwargs = {}
+        tool_definitions = _collect_tool_definitions(
+            invocation_params.get("tools"),
+            invocation_params.get("functions"),
+            invocation_kwargs.get("tools"),
+            invocation_kwargs.get("functions"),
+            serialized_kwargs.get("tools"),
+            serialized_kwargs.get("functions"),
+        )
         tool_definitions_json = None
         if tool_definitions:
             tool_definitions_json = _format_tool_definitions(tool_definitions)
@@ -1637,7 +1740,15 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             record.span.set_status(status)
         token = record.stash.pop("span_context_token", None)
         if token:
-            token.__exit__(None, None, None)
+            try:
+                token.__exit__(None, None, None)
+            except ValueError:
+                LOGGER.debug(
+                    "Failed to detach span context for run %s; "
+                    "continuing without context reset.",
+                    record.run_id,
+                    exc_info=True,
+                )
         record.span.end()
         self._run_parent_override.pop(str(run_id), None)
 
