@@ -700,19 +700,19 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             return True
         if parent_run_id is None:
             return False
-        if metadata.get("langgraph_node") or metadata.get("agent_name"):
+        if metadata.get("agent_name"):
             return False
         if metadata.get("agent_type"):
             return False
         if agent_name == _LANGGRAPH_GENERIC_NAME:
-            return False
-        if agent_name:
             return False
         callback_name = str((callback_kwargs or {}).get("name") or "")
         node_label = str(node_name or "")
         if callback_name and node_label and callback_name == node_label:
             return True
         if callback_name == "should_continue" and node_label and node_label != "coordinator":
+            return True
+        if callback_name == _LANGGRAPH_GENERIC_NAME and not metadata.get("otel_agent_span"):
             return True
         return False
 
