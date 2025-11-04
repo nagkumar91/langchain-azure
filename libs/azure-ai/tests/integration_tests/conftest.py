@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, MutableMapping, cast
 
 import pytest
-from vcr import VCR  # type: ignore[import-not-found]
+from vcr import VCR  # type: ignore[import-not-found, import-untyped]
 
 FILTER_HEADERS = [
     ("authorization", "REDACTED"),
