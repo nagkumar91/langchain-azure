@@ -675,6 +675,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         agent_name: Optional[str],
         parent_run_id: Optional[UUID],
         metadata: Optional[dict[str, Any]],
+        callback_kwargs: Optional[dict[str, Any]],
     ) -> bool:
         metadata = metadata or {}
         node_name = metadata.get("langgraph_node")
@@ -707,6 +708,12 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             return False
         if agent_name:
             return False
+        callback_name = str((callback_kwargs or {}).get("name") or "")
+        node_label = str(node_name or "")
+        if callback_name and node_label and callback_name == node_label:
+            return True
+        if callback_name == "should_continue" and node_label and node_label != "coordinator":
+            return True
         return False
 
     def _resolve_parent_id(self, parent_run_id: Optional[UUID]) -> Optional[str]:
@@ -946,7 +953,9 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         )
         run_key = str(run_id)
         parent_key = str(parent_run_id) if parent_run_id else None
-        if self._should_ignore_agent_span(agent_hint, parent_run_id, metadata):
+        if self._should_ignore_agent_span(
+            agent_hint, parent_run_id, metadata, kwargs
+        ):
             self._ignored_runs.add(run_key)
             self._run_parent_override[run_key] = parent_key
             return
