@@ -680,8 +680,9 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         node_name = metadata.get("langgraph_node")
         if node_name == _LANGGRAPH_START_NODE:
             return True
-        if "otel_agent_span" in metadata:
-            if metadata.get("otel_agent_span"):
+        otel_flag = metadata.get("otel_agent_span")
+        if otel_flag is not None:
+            if otel_flag:
                 meta_agent_name = metadata.get("agent_name") or metadata.get(
                     "agent_type"
                 )
@@ -692,6 +693,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                 ):
                     return True
                 return False
+            # Explicitly marked as a non-agent span; skip tracing.
             return True
         if agent_name and _LANGGRAPH_MIDDLEWARE_PREFIX in agent_name:
             return True
