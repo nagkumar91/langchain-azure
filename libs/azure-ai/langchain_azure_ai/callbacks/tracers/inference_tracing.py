@@ -62,6 +62,10 @@ except ImportError as exc:  # pragma: no cover
 
 LOGGER = logging.getLogger(__name__)
 
+_LANGGRAPH_GENERIC_NAME = "LangGraph"
+_LANGGRAPH_START_NODE = "__start__"
+_LANGGRAPH_MIDDLEWARE_PREFIX = "Middleware."
+
 
 class Attrs:
     """Semantic convention attribute names used throughout the tracer."""
@@ -428,11 +432,7 @@ def _resolve_agent_name(
     )
     resolved = str(candidate) if candidate else None
 
-    generic_markers = {
-        "",
-        "LangGraph",
-        default,
-    }
+    generic_markers = {"", _LANGGRAPH_GENERIC_NAME, default}
     if resolved is None or resolved.strip() in generic_markers:
         path = metadata.get("langgraph_path")
         if isinstance(path, (list, tuple)) and path:
@@ -678,7 +678,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
     ) -> bool:
         metadata = metadata or {}
         node_name = metadata.get("langgraph_node")
-        if node_name == "__start__":
+        if node_name == _LANGGRAPH_START_NODE:
             return True
         if "otel_agent_span" in metadata:
             if metadata.get("otel_agent_span"):
@@ -693,7 +693,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                     return True
                 return False
             return True
-        if agent_name and "Middleware." in agent_name:
+        if agent_name and _LANGGRAPH_MIDDLEWARE_PREFIX in agent_name:
             return True
         if parent_run_id is None:
             return False
@@ -701,7 +701,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             return False
         if metadata.get("agent_type"):
             return False
-        if agent_name == "LangGraph":
+        if agent_name == _LANGGRAPH_GENERIC_NAME:
             return False
         if agent_name:
             return False
@@ -1742,7 +1742,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         if token:
             try:
                 token.__exit__(None, None, None)
-            except ValueError:
+            except Exception:
                 LOGGER.debug(
                     "Failed to detach span context for run %s; "
                     "continuing without context reset.",
