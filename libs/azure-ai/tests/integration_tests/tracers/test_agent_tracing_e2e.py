@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, cast
+from typing import Any, Dict, List, Optional, cast
 from uuid import UUID
 
 import pytest
 from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
 
 from langchain_azure_ai.callbacks.tracers.inference_tracing import (
     Attrs,
@@ -182,3 +186,88 @@ def test_agent_with_tool_records_tool_span() -> None:
     parent_span = span_index.get(tool_span.parent_run_id or "")
     assert parent_span is not None
     assert parent_span.operation in {"invoke_agent", "chat"}
+
+
+@pytest.mark.block_network()
+def test_langgraph_agent_loop_records_spans() -> None:
+    """Ensure LangGraph agent/tool loop traces correctly."""
+    tracer = RecordingTracer(enable_content_recording=True, name="music-agent")
+
+    @tool
+    def play_song_on_spotify(song: str) -> str:
+        """Play a song on Spotify."""
+        return f"Successfully played {song} on Spotify!"
+
+    @tool
+    def play_song_on_apple(song: str) -> str:
+        """Play a song on Apple Music."""
+        return f"Successfully played {song} on Apple Music!"
+
+    tool_call_message = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "play_song_on_apple",
+                "id": "call_music",
+                "args": {"song": "Taylor Swift's most popular song"},
+            }
+        ],
+    )
+    final_reply = AIMessage(content="Playing Taylor Swift's most popular song!")
+    responses = cast(List[BaseMessage], [tool_call_message, final_reply])
+    model = ToolAwareFakeMessagesListChatModel(responses=responses)
+    model.bind_tools(
+        [play_song_on_apple, play_song_on_spotify],
+        parallel_tool_calls=False,
+    )
+
+    def should_continue(state: MessagesState) -> str:
+        last_message = state["messages"][-1]
+        return "continue" if getattr(last_message, "tool_calls", None) else "end"
+
+    def call_model(state: MessagesState) -> Dict[str, List[AIMessage]]:
+        response = model.invoke(state["messages"])
+        return {"messages": [response]}
+
+    workflow = StateGraph(MessagesState)
+    workflow.add_node("agent", call_model)
+    workflow.add_node("action", ToolNode([play_song_on_apple, play_song_on_spotify]))
+    workflow.add_edge(START, "agent")
+    workflow.add_conditional_edges(
+        "agent",
+        should_continue,
+        {"continue": "action", "end": END},
+    )
+    workflow.add_edge("action", "agent")
+    app = workflow.compile(checkpointer=MemorySaver())
+
+    config = cast(
+        RunnableConfig,
+        {"configurable": {"thread_id": "music-thread"}, "callbacks": [tracer]},
+    )
+    input_message = HumanMessage(
+        content="Can you play Taylor Swift's most popular song?"
+    )
+    final_message: Optional[AIMessage] = None
+    initial_state: MessagesState = {"messages": [input_message]}
+    for event in app.stream(
+        cast(Any, initial_state),
+        config=config,
+        stream_mode="values",
+    ):
+        final_message = cast(AIMessage, event["messages"][-1])
+
+    assert final_message is not None
+    assert "Taylor Swift" in final_message.content
+
+    execute_span = next(
+        span for span in tracer.completed_spans if span.operation == "execute_tool"
+    )
+    assert execute_span.attributes.get(Attrs.TOOL_NAME) == "play_song_on_apple"
+
+    root_span = next(
+        span
+        for span in tracer.completed_spans
+        if span.operation == "invoke_agent" and span.parent_run_id is None
+    )
+    assert root_span.attributes.get(Attrs.AGENT_NAME) == "LangGraph"

@@ -710,9 +710,15 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         node_label = str(node_name or "")
         if callback_name and node_label and callback_name == node_label:
             return True
-        if callback_name == "should_continue" and node_label and node_label != "coordinator":
+        if (
+            callback_name == "should_continue"
+            and node_label
+            and node_label != "coordinator"
+        ):
             return True
-        if callback_name == _LANGGRAPH_GENERIC_NAME and not metadata.get("otel_agent_span"):
+        if callback_name == _LANGGRAPH_GENERIC_NAME and not metadata.get(
+            "otel_agent_span"
+        ):
             return True
         return False
 
@@ -953,9 +959,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         )
         run_key = str(run_id)
         parent_key = str(parent_run_id) if parent_run_id else None
-        if self._should_ignore_agent_span(
-            agent_hint, parent_run_id, metadata, kwargs
-        ):
+        if self._should_ignore_agent_span(agent_hint, parent_run_id, metadata, kwargs):
             self._ignored_runs.add(run_key)
             self._run_parent_override[run_key] = parent_key
             return
