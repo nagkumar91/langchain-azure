@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Dict
+from typing import Any, Dict, MutableMapping, cast
 
 import pytest
-from vcr import VCR
+from vcr import VCR  # type: ignore[import-not-found]
 
 FILTER_HEADERS = [
     ("authorization", "REDACTED"),
@@ -18,15 +18,16 @@ FILTER_HEADERS = [
 ]
 
 
-def _sanitize_request(request: Dict) -> Dict:
+def _sanitize_request(request: Any) -> Any:
+    headers = cast(MutableMapping[str, Any], getattr(request, "headers", {}))
     for header, replacement in FILTER_HEADERS:
-        if header in request.headers:
-            request.headers[header] = replacement
+        if header in headers:
+            headers[header] = replacement
     return request
 
 
-def _sanitize_response(response: Dict) -> Dict:
-    headers = response.get("headers", {})
+def _sanitize_response(response: Dict[str, Any]) -> Dict[str, Any]:
+    headers = cast(MutableMapping[str, Any], response.get("headers", {}))
     for header in headers:
         headers[header] = ["REDACTED"]
     return response

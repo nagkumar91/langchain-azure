@@ -6,10 +6,12 @@ from typing import Any, Dict, List
 from uuid import UUID
 
 import pytest
-from langchain_openai import AzureChatOpenAI, ChatOpenAI
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, SystemMessage
-from langgraph.graph import MessagesState, StateGraph, START
+from langchain_openai import AzureChatOpenAI, ChatOpenAI
+from langgraph.graph import START, MessagesState, StateGraph
 from langgraph.runtime import Runtime
+from pydantic import SecretStr
 from typing_extensions import TypedDict
 
 from langchain_azure_ai.callbacks.tracers.inference_tracing import (
@@ -85,41 +87,38 @@ class RecordingTracer(AzureAIOpenTelemetryTracer):
             )
 
 
-def _build_negative_agent(tracer: RecordingTracer, use_azure: bool):
+def _build_negative_agent(tracer: RecordingTracer, use_azure: bool) -> Any:
+    model: BaseChatModel
     if use_azure:
         model = AzureChatOpenAI(
             azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
-            api_key=os.environ["AZURE_OPENAI_API_KEY"],
+            api_key=SecretStr(os.environ["AZURE_OPENAI_API_KEY"]),
             api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-10-21"),
             azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT"],
             temperature=0.1,
-            max_tokens=100,
             top_p=0.9,
             frequency_penalty=0.5,
             presence_penalty=0.5,
-            stop=["\n", "Human:", "AI:"],
             seed=100,
         )
     else:
         model = ChatOpenAI(model="gpt-4.1")
 
-    async def call_model(state: MessagesState, runtime: Runtime[Context]) -> Dict[str, Any]:
-        return {
-            "messages": [
-                await model.ainvoke(
-                    [
-                        SystemMessage(
-                            content=(
-                                "You are a helpful assistant that always replies back "
-                                "to the user stating exactly the opposite of what the "
-                                "user said."
-                            )
-                        )
-                    ]
-                    + state["messages"]
+    async def call_model(
+        state: MessagesState,
+        runtime: Runtime[Context],
+    ) -> Dict[str, Any]:
+        prompt_messages = [
+            SystemMessage(
+                content=(
+                    "You are a helpful assistant that always replies back "
+                    "to the user stating exactly the opposite of what the "
+                    "user said."
                 )
-            ]
-        }
+            ),
+            *state["messages"],
+        ]
+        return {"messages": [await model.ainvoke(prompt_messages)]}
 
     graph = (
         StateGraph(MessagesState, context_schema=Context)
