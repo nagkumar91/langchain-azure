@@ -29,7 +29,7 @@ import logging
 import os
 from dataclasses import asdict, dataclass, field, is_dataclass
 from threading import Lock
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Union, cast
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Union, cast
 from uuid import UUID
 
 from langchain_core.agents import AgentAction, AgentFinish
@@ -474,10 +474,264 @@ def _extract_usage_tokens(
         return None
 
     return (
-        _lookup(("prompt_tokens", "input_tokens")),
-        _lookup(("completion_tokens", "output_tokens")),
-        _lookup(("total_tokens",)),
+        _lookup(
+            (
+                "prompt_tokens",
+                "input_tokens",
+                "inputTokens",
+                "inputTokenCount",
+                "promptTokenCount",
+            )
+        ),
+        _lookup(
+            (
+                "completion_tokens",
+                "output_tokens",
+                "outputTokens",
+                "outputTokenCount",
+                "completionTokenCount",
+            )
+        ),
+        _lookup(("total_tokens", "totalTokens", "totalTokenCount")),
     )
+
+
+def _coerce_token_value(value: Any) -> Optional[int]:
+    if isinstance(value, (list, tuple, set)):
+        total = 0
+        found = False
+        for item in value:
+            coerced = _coerce_token_value(item)
+            if coerced is not None:
+                total += coerced
+                found = True
+        return total if found else None
+    if isinstance(value, Mapping):
+        for key in (
+            "value",
+            "values",
+            "count",
+            "token_count",
+            "tokenCount",
+            "tokens",
+            "total",
+        ):
+            if key in value:
+                coerced = _coerce_token_value(value[key])
+                if coerced is not None:
+                    return coerced
+        return None
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes, bytearray)):
+        total = 0
+        found = False
+        for item in value:
+            coerced = _coerce_token_value(item)
+            if coerced is not None:
+                total += coerced
+                found = True
+        return total if found else None
+    return _coerce_int(value)
+
+
+def _normalize_bedrock_usage_dict(
+    usage: Any,
+) -> Optional[dict[str, int]]:
+    if not isinstance(usage, Mapping):
+        return None
+    normalized: dict[str, int] = {}
+    key_variants = {
+        "prompt_tokens": (
+            "prompt_tokens",
+            "input_tokens",
+            "inputTokens",
+            "inputTokenCount",
+            "promptTokenCount",
+        ),
+        "completion_tokens": (
+            "completion_tokens",
+            "output_tokens",
+            "outputTokens",
+            "outputTokenCount",
+            "completionTokenCount",
+        ),
+        "total_tokens": ("total_tokens", "totalTokens", "totalTokenCount"),
+    }
+    for target_key, variants in key_variants.items():
+        for variant in variants:
+            if variant in usage:
+                value = _coerce_token_value(usage[variant])
+                if value is not None:
+                    normalized[target_key] = value
+                    break
+    if not normalized:
+        return None
+    if "total_tokens" not in normalized:
+        input_tokens = normalized.get("prompt_tokens")
+        output_tokens = normalized.get("completion_tokens")
+        if input_tokens is not None or output_tokens is not None:
+            normalized["total_tokens"] = (input_tokens or 0) + (output_tokens or 0)
+    return normalized
+
+
+def _normalize_bedrock_metrics(metrics: Any) -> Optional[dict[str, int]]:
+    if not isinstance(metrics, Mapping):
+        return None
+    normalized: dict[str, int] = {}
+    input_tokens = _coerce_token_value(metrics.get("inputTokenCount"))
+    output_tokens = _coerce_token_value(metrics.get("outputTokenCount"))
+    total_tokens = _coerce_token_value(metrics.get("totalTokenCount"))
+    if input_tokens is not None:
+        normalized["prompt_tokens"] = input_tokens
+    if output_tokens is not None:
+        normalized["completion_tokens"] = output_tokens
+    if total_tokens is not None:
+        normalized["total_tokens"] = total_tokens
+    elif normalized:
+        normalized["total_tokens"] = (normalized.get("prompt_tokens") or 0) + (
+            normalized.get("completion_tokens") or 0
+        )
+    return normalized or None
+
+
+def _usage_metadata_to_mapping(usage_metadata: Any) -> Optional[Mapping[str, Any]]:
+    if usage_metadata is None:
+        return None
+    if isinstance(usage_metadata, Mapping):
+        return usage_metadata
+    dict_method = getattr(usage_metadata, "dict", None)
+    if callable(dict_method):
+        try:
+            return dict_method(exclude_none=True)
+        except TypeError:
+            return dict_method()
+    extracted: Dict[str, Any] = {}
+    for attr in (
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "prompt_tokens",
+        "completion_tokens",
+    ):
+        value = getattr(usage_metadata, attr, None)
+        if value is not None:
+            extracted[attr] = value
+    return extracted or None
+
+
+def _collect_usage_from_generations(
+    generations: Sequence[ChatGeneration],
+) -> Optional[dict[str, int]]:
+    for gen in generations:
+        message = getattr(gen, "message", None)
+        usage_metadata = getattr(message, "usage_metadata", None)
+        mapping = _usage_metadata_to_mapping(usage_metadata)
+        if mapping:
+            normalized = _normalize_bedrock_usage_dict(mapping)
+            if normalized:
+                return normalized
+        generation_info = getattr(gen, "generation_info", None)
+        if isinstance(generation_info, Mapping):
+            normalized = _normalize_bedrock_usage_dict(generation_info.get("usage"))
+            if normalized:
+                return normalized
+            normalized = _normalize_bedrock_metrics(
+                generation_info.get("amazon-bedrock-invocationMetrics")
+            )
+            if normalized:
+                return normalized
+    return None
+
+
+def _extract_bedrock_usage(
+    llm_output: Mapping[str, Any],
+    generations: Sequence[ChatGeneration],
+) -> Optional[dict[str, int]]:
+    usage_candidates: List[Mapping[str, Any]] = []
+    if isinstance(llm_output.get("usage"), Mapping):
+        usage_candidates.append(llm_output["usage"])
+    metrics = _normalize_bedrock_metrics(
+        llm_output.get("amazon-bedrock-invocationMetrics")
+    )
+    if metrics:
+        return metrics
+    for container_key in (
+        "response",
+        "response_metadata",
+        "additional_kwargs",
+        "raw_response",
+        "amazon_bedrock",
+        "amazon-bedrock",
+        "amazonBedrock",
+    ):
+        container = llm_output.get(container_key)
+        if not isinstance(container, Mapping):
+            continue
+        nested_metrics = _normalize_bedrock_metrics(
+            container.get("amazon-bedrock-invocationMetrics")
+        )
+        if nested_metrics:
+            return nested_metrics
+        nested_usage = container.get("usage")
+        if isinstance(nested_usage, Mapping):
+            usage_candidates.append(nested_usage)
+    for candidate in usage_candidates:
+        normalized = _normalize_bedrock_usage_dict(candidate)
+        if normalized:
+            return normalized
+    return _collect_usage_from_generations(generations)
+
+
+def _resolve_usage_from_llm_output(
+    llm_output: Mapping[str, Any],
+    generations: Sequence[ChatGeneration],
+) -> tuple[
+    Optional[int],
+    Optional[int],
+    Optional[int],
+    Optional[dict[str, int]],
+    bool,
+]:
+    """Return resolved token counts and optionally a normalized payload.
+
+    The final boolean indicates whether the caller should attach the normalized
+    payload back onto ``llm_output`` under ``token_usage``.
+    """
+    candidates: List[tuple[str, Any]] = []
+    bedrock_usage = _extract_bedrock_usage(llm_output, generations)
+    if bedrock_usage:
+        candidates.append(("bedrock", bedrock_usage))
+    if llm_output.get("token_usage"):
+        candidates.append(("token_usage", llm_output["token_usage"]))
+    if isinstance(llm_output.get("usage"), Mapping):
+        candidates.append(("usage", llm_output["usage"]))
+
+    for source, payload in candidates:
+        (
+            input_tokens,
+            output_tokens,
+            total_tokens,
+        ) = _extract_usage_tokens(payload)
+        if input_tokens is None and output_tokens is None and total_tokens is None:
+            continue
+        normalized: dict[str, int] = {}
+        if input_tokens is not None:
+            normalized["prompt_tokens"] = input_tokens
+        if output_tokens is not None:
+            normalized["completion_tokens"] = output_tokens
+        if total_tokens is None and normalized:
+            total_tokens = (input_tokens or 0) + (output_tokens or 0)
+        if total_tokens is not None:
+            normalized["total_tokens"] = total_tokens
+        should_attach = source != "token_usage"
+        return (
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            normalized or None,
+            should_attach,
+        )
+
+    return None, None, None, None, False
 
 
 def _infer_provider_name(
@@ -485,6 +739,15 @@ def _infer_provider_name(
     metadata: Optional[dict[str, Any]],
     invocation_params: Optional[dict[str, Any]],
 ) -> Optional[str]:
+    def _contains_bedrock(value: Any) -> bool:
+        if isinstance(value, str):
+            return "bedrock" in value.lower()
+        if isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            return any(_contains_bedrock(item) for item in value)
+        return False
+
     provider = (metadata or {}).get("ls_provider")
     if provider:
         provider = provider.lower()
@@ -494,6 +757,8 @@ def _infer_provider_name(
             return "openai"
         if provider in {"github"}:
             return "azure.ai.openai"
+        if "bedrock" in provider or provider in {"amazon_bedrock", "aws_bedrock"}:
+            return "aws.bedrock"
     if invocation_params:
         base_url = invocation_params.get("base_url")
         if isinstance(base_url, str):
@@ -504,12 +769,31 @@ def _infer_provider_name(
                 return "openai"
             if "ollama" in lowered:
                 return "ollama"
+            if "bedrock" in lowered or "amazonaws.com" in lowered:
+                return "aws.bedrock"
+        for key in ("endpoint_url", "service_url"):
+            url = invocation_params.get(key)
+            if isinstance(url, str) and "bedrock" in url.lower():
+                return "aws.bedrock"
+        provider_hint = invocation_params.get("provider") or invocation_params.get(
+            "provider_name"
+        )
+        if isinstance(provider_hint, str) and "bedrock" in provider_hint.lower():
+            return "aws.bedrock"
     if serialized:
         kwargs = serialized.get("kwargs", {})
         if kwargs.get("azure_endpoint") or kwargs.get("openai_api_base", "").endswith(
             ".azure.com"
         ):
             return "azure.ai.openai"
+        identifier_candidates = [
+            serialized.get("id"),
+            serialized.get("name"),
+            kwargs.get("_type"),
+            kwargs.get("provider"),
+        ]
+        if any(_contains_bedrock(candidate) for candidate in identifier_candidates):
+            return "aws.bedrock"
     return None
 
 
@@ -1279,14 +1563,30 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                 Attrs.RESPONSE_FINISH_REASONS, _as_json_attribute(finish_reasons)
             )
 
-        llm_output = getattr(response, "llm_output", {}) or {}
-        token_usage = llm_output.get("token_usage")
-        if token_usage:
-            (
-                input_tokens,
-                output_tokens,
-                total_tokens,
-            ) = _extract_usage_tokens(token_usage)
+        llm_output_raw = getattr(response, "llm_output", {}) or {}
+        llm_output = llm_output_raw if isinstance(llm_output_raw, Mapping) else {}
+        (
+            input_tokens,
+            output_tokens,
+            total_tokens,
+            normalized_usage,
+            should_attach_usage,
+        ) = _resolve_usage_from_llm_output(llm_output, chat_generations)
+        if normalized_usage and should_attach_usage:
+            try:
+                if hasattr(llm_output_raw, "__setitem__"):
+                    llm_output_raw["token_usage"] = dict(normalized_usage)
+                elif hasattr(llm_output_raw, "__dict__"):
+                    setattr(llm_output_raw, "token_usage", dict(normalized_usage))
+            except Exception:  # pragma: no cover - defensive
+                LOGGER.debug(
+                    "Failed to attach normalized usage to llm_output", exc_info=True
+                )
+        if (
+            input_tokens is not None
+            or output_tokens is not None
+            or total_tokens is not None
+        ):
             if input_tokens is not None:
                 record.span.set_attribute(Attrs.USAGE_INPUT_TOKENS, input_tokens)
                 record.attributes[Attrs.USAGE_INPUT_TOKENS] = input_tokens
