@@ -1322,7 +1322,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             record_content=self._content_recording,
             include_roles={"user", "assistant", "tool"},
         )
-        if formatted_messages:
+        is_root_agent = attributes[Attrs.AGENT_NAME] == _LANGGRAPH_GENERIC_NAME
+        if formatted_messages and not is_root_agent:
             attributes[Attrs.INPUT_MESSAGES] = formatted_messages
         if system_instr:
             attributes[Attrs.SYSTEM_INSTRUCTIONS] = system_instr
@@ -1938,7 +1939,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             record_content=self._content_recording,
             include_roles={"user", "assistant", "tool"},
         )
-        if formatted_input:
+        is_root_agent = attributes.get(Attrs.AGENT_NAME) == _LANGGRAPH_GENERIC_NAME
+        if formatted_input and not is_root_agent:
             attributes[Attrs.INPUT_MESSAGES] = formatted_input
         if system_instr:
             attributes[Attrs.SYSTEM_INSTRUCTIONS] = system_instr
