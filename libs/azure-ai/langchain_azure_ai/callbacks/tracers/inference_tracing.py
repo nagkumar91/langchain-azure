@@ -300,6 +300,29 @@ def _filter_assistant_output(formatted_messages: str) -> Optional[str]:
     return _as_json_attribute(cleaned)
 
 
+def _select_final_assistant_message(raw_messages: Any) -> Optional[List[Any]]:
+    if not raw_messages:
+        return None
+
+    if isinstance(raw_messages, dict):
+        iterable: Sequence[Any] = raw_messages.get("messages") or []
+    elif isinstance(raw_messages, (list, tuple)):
+        if raw_messages and isinstance(raw_messages[0], (list, tuple)):
+            iterable = [msg for thread in raw_messages for msg in thread]
+        else:
+            iterable = list(raw_messages)
+    else:
+        iterable = [raw_messages]
+
+    final_message: Optional[Any] = None
+    for item in iterable:
+        if _message_role(item) == "assistant":
+            final_message = item
+    if final_message is None:
+        return None
+    return [final_message]
+
+
 def _scrub_value(value: Any, record_content: bool) -> Any:
     if value is None:
         return None
@@ -1410,8 +1433,13 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                     messages_payload = outputs
             else:
                 messages_payload = outputs
+            messages_for_formatting = messages_payload
+            if record.operation == "invoke_agent" and record.parent_run_id is None:
+                final_message_only = _select_final_assistant_message(messages_payload)
+                if final_message_only:
+                    messages_for_formatting = final_message_only
             formatted_messages, _ = _prepare_messages(
-                messages_payload,
+                messages_for_formatting,
                 record_content=self._content_recording,
                 include_roles={"assistant"},
             )
