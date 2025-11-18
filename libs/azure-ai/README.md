@@ -90,6 +90,35 @@ print(' '.join(chunk.content for chunk in message_stream))
  C iao ! 
 ```
 
+## Propagating OpenTelemetry trace headers
+
+`AzureAIOpenTelemetryTracer` now exposes `use_propagated_context`, a context
+manager that attaches an incoming OpenTelemetry context (for example the
+`traceparent` header that Azure API Management forwards). Wrapping your LangChain
+or LangGraph call ensures every span emitted by the tracer becomes a child of
+the upstream request instead of starting a brand-new trace.
+
+```python
+from fastapi import Request, FastAPI
+from langchain_azure_ai.callbacks.tracers import AzureAIOpenTelemetryTracer
+
+app = FastAPI()
+tracer = AzureAIOpenTelemetryTracer(
+  connection_string="<APP_INSIGHTS_CONNECTION_STRING>",
+)
+
+@app.post("/invoke")
+async def invoke(request: Request):
+  headers = {
+    key.lower(): value
+    for key, value in request.headers.items()
+    if key.lower() in {"traceparent", "tracestate"}
+  }
+  with tracer.use_propagated_context(headers=headers):
+    result = graph.invoke(payload, config={"callbacks": [tracer]})
+  return result
+```
+
 ## Changelog
 
 - **1.0.2**:

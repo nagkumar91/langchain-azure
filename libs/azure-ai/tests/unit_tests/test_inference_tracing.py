@@ -1,6 +1,6 @@
 import json
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
 from uuid import uuid4
 
 import pytest
@@ -64,9 +64,11 @@ class MockSpan:
 
 class MockTracer:
     spans: List[MockSpan]
+    contexts: List[Any]
 
     def __init__(self) -> None:
         self.spans = []
+        self.contexts = []
 
     def start_span(
         self,
@@ -77,6 +79,7 @@ class MockTracer:
     ) -> MockSpan:
         span = MockSpan(name, attributes)
         self.spans.append(span)
+        self.contexts.append(context)
         return span
 
 
@@ -85,7 +88,10 @@ def patch_otel(monkeypatch: pytest.MonkeyPatch) -> None:
     mock = SimpleNamespace(get_tracer=lambda *_, **__: MockTracer())
     monkeypatch.setattr(tracing, "otel_trace", mock)
     monkeypatch.setattr(tracing, "set_span_in_context", lambda span: None)
-    monkeypatch.setattr(tracing, "get_current_span", lambda: None)
+    monkeypatch.setattr(tracing, "get_current_span", lambda *_, **__: None)
+    monkeypatch.setattr(tracing, "attach", lambda ctx: object())
+    monkeypatch.setattr(tracing, "detach", lambda token: None)
+    monkeypatch.setattr(tracing, "extract", lambda *_, **__: None)
 
 
 def get_last_span_for(
@@ -266,6 +272,7 @@ def test_inference_span_records_gen_ai_semantic_attributes() -> None:
     )
 
     llm_run = uuid4()
+    
     invocation_params = {
         "model": "gpt-4o",
         "max_tokens": 128,
@@ -595,6 +602,35 @@ def test_tool_deduplicates_synthetic_entries(
     assert span.attributes.get(tracing.Attrs.TOOL_CALL_ID) == "call-1"
 
 
+def test_end_span_handles_context_detach_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FaultyToken:
+        def __enter__(self) -> None:
+            return None
+
+        def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+            raise ValueError("context mismatch")
+
+    token = FaultyToken()
+
+    def fake_use_span(span: Any, *, end_on_exit: bool = False) -> FaultyToken:
+        return token
+
+    monkeypatch.setattr(tracing, "use_span", fake_use_span)
+
+    tracer = tracing.AzureAIOpenTelemetryTracer()
+    run_id = uuid4()
+    tracer._start_span(  # type: ignore[attr-defined]
+        run_id,
+        "test",
+        operation="invoke_agent",
+        kind=tracing.SpanKind.INTERNAL,  # type: ignore[attr-defined]
+        parent_run_id=None,
+    )
+    tracer._end_span(run_id)  # type: ignore[attr-defined]
+
+
 def test_invoke_agent_records_tool_definitions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -847,3 +883,125 @@ def test_pending_tool_call_cached_for_chain_end(
     tool_part = next(part for part in parts if part.get("type") == "tool_call_response")
     assert tool_part["id"] == "abc"
     assert tool_part["result"] == "result"
+
+
+def test_use_propagated_context_normalizes_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracer = tracing.AzureAIOpenTelemetryTracer()
+    sentinel_context = object()
+    captured_carrier: Dict[str, Any] = {}
+    attach_calls: List[Any] = []
+    detach_calls: List[Any] = []
+    parent_span = SimpleNamespace(
+        get_span_context=lambda: SimpleNamespace(is_valid=True)
+    )
+
+    def fake_extract(
+        *, carrier: Mapping[str, Any], getter=None, context=None
+    ) -> Any:
+        captured_carrier.update(carrier)
+        return sentinel_context
+
+    def fake_attach(ctx: Any) -> str:
+        attach_calls.append(ctx)
+        return "token"
+
+    def fake_detach(token: Any) -> None:
+        detach_calls.append(token)
+
+    def fake_get_current_span(ctx: Any = None) -> Any:
+        if ctx is sentinel_context:
+            return parent_span
+        return None
+
+    monkeypatch.setattr(tracing, "extract", fake_extract)
+    monkeypatch.setattr(tracing, "attach", fake_attach)
+    monkeypatch.setattr(tracing, "detach", fake_detach)
+    monkeypatch.setattr(tracing, "get_current_span", fake_get_current_span)
+
+    headers = {"TraceParent": "00-abc-123-01", "x-ignore": "value"}
+    with tracer.use_propagated_context(headers=headers):
+        pass
+
+    assert captured_carrier.get("traceparent") == "00-abc-123-01"
+    assert "TraceParent" not in captured_carrier
+    assert attach_calls == [sentinel_context]
+    assert detach_calls == ["token"]
+
+
+def test_use_propagated_context_requires_input() -> None:
+    tracer = tracing.AzureAIOpenTelemetryTracer()
+    with pytest.raises(ValueError):
+        with tracer.use_propagated_context():
+            pass
+
+
+def test_spans_inherit_attached_parent_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracer = tracing.AzureAIOpenTelemetryTracer()
+    sentinel_context = object()
+    current_context: Dict[str, Any] = {"value": None}
+    parent_span = SimpleNamespace(
+        get_span_context=lambda: SimpleNamespace(is_valid=True)
+    )
+    context_markers: List[Any] = []
+
+    def fake_extract(
+        *, carrier: Mapping[str, Any], getter=None, context=None
+    ) -> Any:
+        return sentinel_context
+
+    def fake_attach(ctx: Any) -> str:
+        current_context["value"] = ctx
+        return "token"
+
+    def fake_detach(token: Any) -> None:
+        current_context["value"] = None
+
+    def fake_get_current_span(ctx: Any = None) -> Any:
+        if ctx is sentinel_context:
+            return parent_span
+        if ctx is None and current_context["value"] is sentinel_context:
+            return parent_span
+        return None
+
+    def fake_set_span_in_context(span: Any) -> str:
+        marker = f"ctx-{len(context_markers)}"
+        context_markers.append(marker)
+        return marker
+
+    monkeypatch.setattr(tracing, "extract", fake_extract)
+    monkeypatch.setattr(tracing, "attach", fake_attach)
+    monkeypatch.setattr(tracing, "detach", fake_detach)
+    monkeypatch.setattr(tracing, "get_current_span", fake_get_current_span)
+    monkeypatch.setattr(
+        tracing,
+        "set_span_in_context",
+        fake_set_span_in_context,
+    )
+
+    prompts = cast(List[str], [{"role": "user", "content": "hi"}])
+    run_no_parent = uuid4()
+    tracer.on_llm_start(
+        {"kwargs": {"model": "m"}},
+        prompts,
+        run_id=run_no_parent,
+        invocation_params={"model": "m"},
+    )
+    mock_tracer = cast(MockTracer, tracer._tracer)
+    assert mock_tracer.contexts[-1] is None
+
+    run_with_parent = uuid4()
+    with tracer.use_propagated_context(
+        headers={"traceparent": "00-abc-123-01"}
+    ):
+        tracer.on_llm_start(
+            {"kwargs": {"model": "m"}},
+            prompts,
+            run_id=run_with_parent,
+            invocation_params={"model": "m"},
+        )
+
+    assert mock_tracer.contexts[-1] == context_markers[-1]
