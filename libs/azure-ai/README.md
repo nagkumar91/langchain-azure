@@ -90,6 +90,59 @@ print(' '.join(chunk.content for chunk in message_stream))
  C iao ! 
 ```
 
+## Tracing compatibility sample (LangGraph)
+
+The tracer can work with dataclass state, non-standard message keys, and Command-like returns. The example below runs locally without network access.
+
+```python
+from dataclasses import dataclass
+from langgraph.graph import START, END, StateGraph
+from langchain_azure_ai.callbacks.tracers.inference_tracing import AzureAIOpenTelemetryTracer
+
+@dataclass
+class State:
+    chat_history: list
+    final: str | None = None
+
+class FakeCommand(dict):
+    def __init__(self, update, goto):
+        super().__init__(update)
+        self.update = update
+        self.goto = goto
+
+async def analyze(state: State, runtime=None):
+    return FakeCommand(
+        {"chat_history": state.chat_history + [{"role": "assistant", "content": "step1"}]},
+        goto="review",
+    )
+
+async def review(state: State, runtime=None):
+    return {
+        "chat_history": state.chat_history + [{"role": "assistant", "content": "done"}],
+        "final": "done",
+    }
+
+tracer = AzureAIOpenTelemetryTracer(
+    message_keys=("messages",),
+    message_paths=("chat_history",),  # look for messages under state.chat_history
+    trace_all_langgraph_nodes=True,
+)
+
+graph = (
+    StateGraph(State)
+    .add_node("analyze", analyze, metadata={"otel_trace": True, "otel_messages_key": "chat_history", "langgraph_node": "analyze"})
+    .add_node("review", review, metadata={"otel_trace": True, "otel_messages_key": "chat_history", "langgraph_node": "review"})
+    .add_edge(START, "analyze")
+    .add_edge("analyze", "review")
+    .add_edge("review", END)
+    .compile(name="tracer-compat-graph")
+    .with_config({"callbacks": [tracer]})
+)
+
+# Run locally (no network calls required)
+result = await graph.ainvoke(State(chat_history=[{"role": "user", "content": "hi"}]))
+```
+
 ## Changelog
 
 - **1.0.4**:
