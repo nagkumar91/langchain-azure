@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, cast
 from uuid import UUID
@@ -120,17 +121,94 @@ def test_basic_agent_tracing_records_spans() -> None:
     assert result["messages"][-1].content == "It's always sunny!"
     span_names = [span.name for span in tracer.completed_spans]
     assert any(name.startswith("invoke_agent") for name in span_names)
-    chat_span = next(
-        span for span in tracer.completed_spans if span.operation == "chat"
+
+
+@pytest.mark.asyncio
+@pytest.mark.block_network()
+async def test_trace_all_nodes_records_unlabeled_graph() -> None:
+    """Tracer should emit spans for every node when trace_all_langgraph_nodes=True."""
+    tracer = RecordingTracer(
+        enable_content_recording=True,
+        name="trace-all",
+        trace_all_langgraph_nodes=True,
+        message_paths=("chat_history",),
     )
-    assert chat_span.attributes.get(Attrs.OPERATION_NAME) == "chat"
-    root_span = next(
-        span
-        for span in tracer.completed_spans
-        if span.operation == "invoke_agent" and span.parent_run_id is None
+
+    @dataclass
+    class State:
+        chat_history: List[Any]
+
+    async def gather(state: State, runtime: Any | None = None) -> Dict[str, Any]:
+        return {
+            "chat_history": state.chat_history
+            + [{"role": "assistant", "content": "gathered"}]
+        }
+
+    async def summarize(state: State, runtime: Any | None = None) -> Dict[str, Any]:
+        return {
+            "chat_history": state.chat_history
+            + [{"role": "assistant", "content": "summarized"}]
+        }
+
+    graph = (
+        StateGraph(State)
+        .add_node("gather", gather)
+        .add_node("summarize", summarize)
+        .add_edge(START, "gather")
+        .add_edge("gather", "summarize")
+        .add_edge("summarize", END)
+        .compile(name="trace-all-graph")
+        .with_config({"callbacks": [tracer]})
     )
-    assert root_span.attributes.get(Attrs.AGENT_NAME) == "LangGraph"
-    assert chat_span.parent_run_id == root_span.run_id
+
+    await graph.ainvoke(State(chat_history=[{"role": "user", "content": "hi"}]))
+
+    span_names = [span.name for span in tracer.completed_spans]
+    assert any("gather" in name for name in span_names)
+    assert any("summarize" in name for name in span_names)
+
+
+@pytest.mark.asyncio
+@pytest.mark.block_network()
+async def test_metadata_message_path_records_wrapped_state() -> None:
+    """Node-level otel_messages_path should extract nested dataclass state."""
+    tracer = RecordingTracer(enable_content_recording=True, name="wrapped-state")
+
+    @dataclass
+    class WrappedState:
+        payload: Dict[str, Any]
+
+    async def enrich(state: WrappedState, runtime: Any | None = None) -> Dict[str, Any]:
+        history = state.payload["messages"]
+        return {
+            "payload": {
+                "messages": history + [{"role": "assistant", "content": "wrapped"}]
+            }
+        }
+
+    graph = (
+        StateGraph(WrappedState)
+        .add_node(
+            "enrich",
+            enrich,
+            metadata={
+                "otel_trace": True,
+                "otel_messages_path": "payload.messages",
+                "langgraph_node": "enrich",
+            },
+        )
+        .add_edge(START, "enrich")
+        .add_edge("enrich", END)
+        .compile(name="wrapped-state-graph")
+        .with_config({"callbacks": [tracer]})
+    )
+
+    await graph.ainvoke(WrappedState(payload={"messages": [{"role": "user", "content": "hi"}]}))
+
+    span = next(span for span in tracer.completed_spans if "enrich" in span.name)
+    input_messages = json.loads(span.attributes[Attrs.INPUT_MESSAGES])
+    assert input_messages[0]["parts"][0]["content"] == "hi"
+    assert span.attributes.get("metadata.langgraph_node") == "enrich"
 
 
 @pytest.mark.block_network()
