@@ -46,6 +46,7 @@ class RecordingTracer(AzureAIOpenTelemetryTracer):
         kind: Any,
         parent_run_id: UUID | None,
         attributes: Dict[str, Any] | None = None,
+        thread_key: str | None = None,
     ) -> None:
         super()._start_span(
             run_id,
@@ -54,6 +55,7 @@ class RecordingTracer(AzureAIOpenTelemetryTracer):
             kind=kind,
             parent_run_id=parent_run_id,
             attributes=attributes,
+            thread_key=thread_key,
         )
         self._span_names[str(run_id)] = name
 

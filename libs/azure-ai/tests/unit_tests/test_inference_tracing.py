@@ -1,4 +1,5 @@
 import json
+from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
 from uuid import uuid4
@@ -100,6 +101,103 @@ def get_all_spans(
 ) -> List[MockSpan]:
     tracer = cast(MockTracer, tracer_obj._tracer)  # type: ignore[attr-defined]
     return list(tracer.spans)
+
+
+def test_chain_start_supports_dataclass_inputs_and_metadata_message_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @dataclass
+    class Inputs:
+        chat_history: List[Dict[str, Any]]
+
+    monkeypatch.setenv("AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED", "true")
+    tracer = tracing.AzureAIOpenTelemetryTracer()
+    run_id = uuid4()
+    tracer.on_chain_start(
+        {},
+        Inputs(chat_history=[{"role": "user", "content": "hi"}]),
+        run_id=run_id,
+        metadata={"otel_messages_key": "chat_history", "agent_name": "X"},
+    )
+    span = get_last_span_for(tracer)
+    payload = json.loads(span.attributes[tracing.Attrs.INPUT_MESSAGES])
+    content = payload[0]["parts"][0]["content"]
+    assert content in {"hi", "[redacted]"}
+
+
+def test_chain_end_supports_command_like_outputs_and_records_goto() -> None:
+    class FakeCommand:
+        def __init__(self, update: Any, goto: str) -> None:
+            self.update = update
+            self.goto = goto
+
+    tracer = tracing.AzureAIOpenTelemetryTracer()
+    run_id = uuid4()
+    tracer.on_chain_start(
+        {},
+        {"messages": [{"role": "user", "content": "hi"}]},
+        run_id=run_id,
+        metadata={"agent_name": "X", "otel_trace": True},
+    )
+    tracer.on_chain_end(
+        FakeCommand(
+            {"messages": [{"role": "assistant", "content": "ok"}]},
+            "review_response",
+        ),
+        run_id=run_id,
+    )
+    span = get_all_spans(tracer)[-1]
+    assert span.attributes.get("metadata.langgraph.goto") == "review_response"
+    output = span.attributes.get(tracing.Attrs.OUTPUT_MESSAGES)
+    if output:
+        parsed = json.loads(output)
+        assert parsed[0]["parts"][0]["content"] in {"ok", "[redacted]"}
+
+
+def test_chain_end_supports_pydantic_like_outputs_model_dump() -> None:
+    class FakeModel:
+        def model_dump(self, exclude_none: bool = True) -> Dict[str, Any]:
+            return {"messages": [{"role": "assistant", "content": "ok"}]}
+
+    tracer = tracing.AzureAIOpenTelemetryTracer()
+    run_id = uuid4()
+    tracer.on_chain_start(
+        {},
+        {"messages": [{"role": "user", "content": "hi"}]},
+        run_id=run_id,
+        metadata={"otel_trace": True, "agent_name": "Y"},
+    )
+    tracer.on_chain_end(FakeModel(), run_id=run_id)
+    span = get_all_spans(tracer)[-1]
+    output = span.attributes.get(tracing.Attrs.OUTPUT_MESSAGES)
+    if output:
+        parsed = json.loads(output)
+        assert parsed[0]["parts"][0]["content"] in {"ok", "[redacted]"}
+
+
+def test_otel_trace_true_forces_tracing_even_if_heuristics_would_ignore() -> None:
+    tracer = tracing.AzureAIOpenTelemetryTracer()
+    run_id = uuid4()
+    tracer.on_chain_start(
+        {},
+        {"messages": [{"role": "user", "content": "hi"}]},
+        run_id=run_id,
+        metadata={"langgraph_node": "node-x", "otel_trace": True},
+        name="node-x",
+    )
+    assert str(run_id) in tracer._spans
+
+
+def test_trace_all_langgraph_nodes_traces_custom_nodes() -> None:
+    tracer = tracing.AzureAIOpenTelemetryTracer(trace_all_langgraph_nodes=True)
+    run_id = uuid4()
+    tracer.on_chain_start(
+        {},
+        {"messages": [{"role": "user", "content": "hi"}]},
+        run_id=run_id,
+        metadata={"langgraph_node": "AnalyzeInput"},
+    )
+    assert str(run_id) in tracer._spans
 
 
 def test_llm_start_attributes_content_recording_on(

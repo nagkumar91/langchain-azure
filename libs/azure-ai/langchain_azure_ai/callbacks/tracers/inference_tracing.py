@@ -309,6 +309,111 @@ def _filter_assistant_output(formatted_messages: str) -> Optional[str]:
     return _as_json_attribute(cleaned)
 
 
+def _to_mapping(value: Any) -> Optional[Mapping[str, Any]]:
+    if isinstance(value, Mapping):
+        return value
+    if is_dataclass(value) and not isinstance(value, type):
+        try:
+            return asdict(value)
+        except Exception:
+            return None
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            dumped = model_dump(exclude_none=True)
+        except TypeError:
+            dumped = model_dump()
+        if isinstance(dumped, Mapping):
+            return dumped
+    dict_method = getattr(value, "dict", None)
+    if callable(dict_method):
+        try:
+            dumped = dict_method(exclude_none=True)
+        except TypeError:
+            dumped = dict_method()
+        if isinstance(dumped, Mapping):
+            return dumped
+    return None
+
+
+def _unwrap_command_like(value: Any) -> tuple[Any, Optional[str]]:
+    try:
+        if hasattr(value, "update") and hasattr(value, "goto"):
+            update = getattr(value, "update")
+            goto = getattr(value, "goto")
+            return update, str(goto) if goto else None
+    except Exception:
+        return value, None
+    return value, None
+
+
+def _extract_by_dot_path(container: Any, path: str) -> Any:
+    current = container
+    for segment in path.split("."):
+        mapping = _to_mapping(current)
+        if mapping is not None and segment in mapping:
+            current = mapping[segment]
+            continue
+        if hasattr(current, segment):
+            try:
+                current = getattr(current, segment)
+                continue
+            except Exception:
+                return None
+        return None
+    return current
+
+
+def _effective_message_keys_paths(
+    metadata: Mapping[str, Any] | None,
+    default_keys: Sequence[str],
+    default_paths: Sequence[str],
+) -> tuple[Sequence[str], Sequence[str]]:
+    keys: Sequence[str] = default_keys
+    paths: Sequence[str] = default_paths
+    if metadata and isinstance(metadata, Mapping):
+        key_override = metadata.get("otel_messages_key")
+        if isinstance(key_override, str):
+            keys = (key_override,)
+        else:
+            keys_candidate = metadata.get("otel_messages_keys")
+            try:
+                if keys_candidate is not None and not isinstance(keys_candidate, str):
+                    keys = tuple(str(k) for k in keys_candidate)
+            except TypeError:
+                keys = default_keys
+        path_override = metadata.get("otel_messages_path")
+        if isinstance(path_override, str):
+            paths = (path_override,)
+    return keys, paths
+
+
+def _extract_messages_payload(
+    container: Any, *, message_keys: Sequence[str], message_paths: Sequence[str]
+) -> tuple[Any, Optional[str]]:
+    unwrapped, goto = _unwrap_command_like(container)
+    fallback_mapping: Optional[Mapping[str, Any]] = None
+    for path in message_paths:
+        value = _extract_by_dot_path(unwrapped, path)
+        if value is not None:
+            return value, goto
+    mapping = _to_mapping(unwrapped)
+    if mapping is not None:
+        fallback_mapping = mapping
+        for key in message_keys:
+            if key in mapping:
+                return mapping[key], goto
+    for key in message_keys:
+        if hasattr(unwrapped, key):
+            try:
+                return getattr(unwrapped, key), goto
+            except Exception:
+                continue
+    if fallback_mapping is not None:
+        return fallback_mapping, goto
+    return unwrapped, goto
+
+
 def _scrub_value(value: Any, record_content: bool) -> Any:
     if value is None:
         return None
@@ -938,6 +1043,11 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         name: str = "AzureAIOpenTelemetryTracer",
         agent_id: Optional[str] = None,
         provider_name: Optional[str] = None,
+        message_keys: Sequence[str] = ("messages",),
+        message_paths: Sequence[str] = (),
+        trace_all_langgraph_nodes: bool = False,
+        ignore_start_node: bool = True,
+        compat_create_agent_filtering: bool = True,
     ) -> None:
         """Initialize tracer state and configure Azure Monitor if needed."""
         super().__init__()
@@ -946,6 +1056,11 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         self._default_provider_name = provider_name
         self._content_recording = enable_content_recording
         self._tracer = otel_trace.get_tracer(name, schema_url=self._schema_url)
+        self._message_keys = tuple(message_keys)
+        self._message_paths = tuple(message_paths)
+        self._trace_all_langgraph_nodes = trace_all_langgraph_nodes
+        self._ignore_start_node = ignore_start_node
+        self._compat_create_agent_filtering = compat_create_agent_filtering
 
         if connection_string is None:
             connection_string = _resolve_connection_from_project(
@@ -1005,25 +1120,28 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
     ) -> bool:
         metadata = metadata or {}
         node_name = metadata.get("langgraph_node")
+        otel_trace_flag = metadata.get("otel_trace")
+        if otel_trace_flag is not None:
+            return not bool(otel_trace_flag)
+        if self._trace_all_langgraph_nodes:
+            if self._ignore_start_node and node_name == _LANGGRAPH_START_NODE:
+                return True
+            if agent_name and _LANGGRAPH_MIDDLEWARE_PREFIX in agent_name:
+                return True
+            if metadata.get("otel_agent_span") is False:
+                return True
+            return False
         if node_name == _LANGGRAPH_START_NODE:
             return True
         otel_flag = metadata.get("otel_agent_span")
         if otel_flag is not None:
             if otel_flag:
-                meta_agent_name = metadata.get("agent_name") or metadata.get(
-                    "agent_type"
-                )
-                if (
-                    node_name
-                    and meta_agent_name
-                    and str(node_name) != str(meta_agent_name)
-                ):
-                    return True
                 return False
-            # Explicitly marked as a non-agent span; skip tracing.
             return True
         if agent_name and _LANGGRAPH_MIDDLEWARE_PREFIX in agent_name:
             return True
+        if not self._compat_create_agent_filtering:
+            return False
         if parent_run_id is None:
             return False
         if metadata.get("agent_name"):
@@ -1336,8 +1454,14 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         if Attrs.PROVIDER_NAME not in attributes and self._default_provider_name:
             attributes[Attrs.PROVIDER_NAME] = self._default_provider_name
 
+        keys, paths = _effective_message_keys_paths(
+            metadata, self._message_keys, self._message_paths
+        )
+        messages_payload, _ = _extract_messages_payload(
+            inputs, message_keys=keys, message_paths=paths
+        )
         formatted_messages, system_instr = _prepare_messages(
-            inputs.get("messages"),
+            messages_payload,
             record_content=self._content_recording,
             include_roles={"user", "assistant", "tool"},
         )
@@ -1432,18 +1556,14 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             return
         thread_key = record.stash.get("thread_id")
         try:
-            messages_payload: Any
-            if isinstance(outputs, dict):
-                messages_payload = outputs.get("messages")
-            elif hasattr(outputs, "get"):
-                try:
-                    messages_payload = outputs.get(  # type: ignore[attr-defined]
-                        "messages"
-                    )
-                except Exception:
-                    messages_payload = outputs
-            else:
-                messages_payload = outputs
+            keys = self._message_keys
+            paths = self._message_paths
+            messages_payload, goto = _extract_messages_payload(
+                outputs, message_keys=keys, message_paths=paths
+            )
+            if goto is not None:
+                record.span.set_attribute("metadata.langgraph.goto", goto)
+                record.attributes["metadata.langgraph.goto"] = goto
             formatted_messages, _ = _prepare_messages(
                 messages_payload,
                 record_content=self._content_recording,
