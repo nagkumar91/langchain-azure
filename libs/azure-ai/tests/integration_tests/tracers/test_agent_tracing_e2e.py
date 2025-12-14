@@ -9,11 +9,15 @@ import pytest
 from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages.tool import ToolCall
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
+from langchain_core.documents import Document
+from langchain_core.retrievers import BaseRetriever
+from pydantic import ConfigDict
 
 from langchain_azure_ai.callbacks.tracers.inference_tracing import (
     Attrs,
@@ -209,6 +213,93 @@ async def test_metadata_message_path_records_wrapped_state() -> None:
     input_messages = json.loads(span.attributes[Attrs.INPUT_MESSAGES])
     assert input_messages[0]["parts"][0]["content"] == "hi"
     assert span.attributes.get("metadata.langgraph_node") == "enrich"
+
+
+class _StaticRetriever(BaseRetriever):
+    docs: List[Document]
+    tags: List[str] = []
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def _get_relevant_documents(
+        self,
+        query: str,
+        *,
+        run_manager: RunnableConfig | None = None,
+    ) -> List[Document]:
+        return self.docs
+
+    async def _aget_relevant_documents(
+        self,
+        query: str,
+        *,
+        run_manager: RunnableConfig | None = None,
+    ) -> List[Document]:
+        return self.docs
+
+
+@pytest.mark.block_network()
+def test_static_retriever_records_results() -> None:
+    """Ensure retriever spans record queries and documents."""
+    tracer = RecordingTracer(enable_content_recording=True, name="retriever")
+    docs = [
+        Document(page_content="alpha", metadata={"chunk": 1}),
+        Document(page_content="beta", metadata={"chunk": 2}),
+    ]
+    retriever = _StaticRetriever(docs=docs)
+
+    retriever.invoke("alpha", config={"callbacks": [tracer]})
+
+    span = next(
+        span
+        for span in tracer.completed_spans
+        if span.operation == "execute_tool" and span.attributes.get(Attrs.TOOL_TYPE) == "retriever"
+    )
+    assert span.attributes.get(Attrs.RETRIEVER_QUERY) == "alpha"
+    recorded = json.loads(span.attributes[Attrs.RETRIEVER_RESULTS])
+    assert recorded[0]["metadata"]["chunk"] == 1
+
+
+@tool
+def exploding_tool(text: str) -> str:
+    """Always raises an exception."""
+    raise ValueError("boom")
+
+
+@pytest.mark.block_network()
+def test_tool_error_span_records_status() -> None:
+    """ToolNode errors should emit execute_tool spans with error metadata."""
+    tracer = RecordingTracer(enable_content_recording=True, name="error-tool")
+    tool_node = ToolNode([exploding_tool])
+
+    graph = (
+        StateGraph(MessagesState)
+        .add_node(
+            "tools",
+            tool_node,
+            metadata={"otel_trace": True, "langgraph_node": "tools"},
+        )
+        .add_edge(START, "tools")
+        .add_edge("tools", END)
+        .compile(name="error-tool-graph")
+        .with_config({"callbacks": [tracer]})
+    )
+
+    ai_message = AIMessage(
+        content="",
+        tool_calls=[
+            ToolCall(id="call-1", name="exploding_tool", args={"text": "hi"})
+        ],
+    )
+
+    with pytest.raises(ValueError):
+        graph.invoke({"messages": [ai_message]})
+
+    span = next(
+        span
+        for span in tracer.completed_spans
+        if span.operation == "execute_tool" and "exploding_tool" in span.name
+    )
+    assert span.attributes.get(Attrs.TOOL_CALL_RESULT) is None
 
 
 @pytest.mark.block_network()

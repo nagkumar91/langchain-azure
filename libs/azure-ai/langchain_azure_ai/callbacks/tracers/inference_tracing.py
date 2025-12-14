@@ -1946,6 +1946,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
     ) -> Any:
         """Start a retriever span."""
         metadata = metadata or {}
+        serialized = serialized or {}
         resolved_parent = self._resolve_parent_id(parent_run_id)
         thread_identifier = _first_non_empty(
             metadata.get("thread_id"),
@@ -1992,6 +1993,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         formatted = _format_documents(documents, record_content=self._content_recording)
         if formatted:
             record.span.set_attribute(Attrs.RETRIEVER_RESULTS, formatted)
+            record.attributes[Attrs.RETRIEVER_RESULTS] = formatted
         record.span.set_status(Status(StatusCode.OK))
         self._end_span(run_id)
 

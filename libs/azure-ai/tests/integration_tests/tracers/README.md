@@ -11,6 +11,8 @@ These tests exercise the `AzureAIOpenTelemetryTracer` against real LangGraph gra
 | `test_negative_agent_tracer_records` | Real `ChatOpenAI` call (VCR-captured). | Exercises the true network flow to ensure span shapes stay compatible with OpenAI responses (requires `OPENAI_API_KEY`). |
 | `test_trace_all_nodes_records_unlabeled_graph` | Graph without per-node metadata while tracer runs in `trace_all_langgraph_nodes` mode. | Confirms every LangGraph node gets its own span and that global `message_paths` are honoured. |
 | `test_metadata_message_path_records_wrapped_state` | Metadata uses `otel_messages_path` to drill into nested dataclass state. | Shows that node-level overrides work even when messages are wrapped deep in custom state. |
+| `test_static_retriever_records_results` | Direct invocation of a `BaseRetriever` subclass with tracer callbacks. | Validates retriever spans (`execute_tool`) capture queries and serialized documents. |
+| `test_tool_error_span_records_status` | ToolNode executes a tool that raises an exception. | Ensures `execute_tool` spans record `error.type` and emit error statuses when tools fail. |
 
 ### Recording Guidance
 
