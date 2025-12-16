@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, cast
 from uuid import UUID
@@ -8,11 +9,15 @@ import pytest
 from langchain.agents import create_agent
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages.tool import ToolCall
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
+from langchain_core.documents import Document
+from langchain_core.retrievers import BaseRetriever
+from pydantic import ConfigDict
 
 from langchain_azure_ai.callbacks.tracers.inference_tracing import (
     Attrs,
@@ -46,6 +51,7 @@ class RecordingTracer(AzureAIOpenTelemetryTracer):
         kind: Any,
         parent_run_id: UUID | None,
         attributes: Dict[str, Any] | None = None,
+        thread_key: str | None = None,
     ) -> None:
         super()._start_span(
             run_id,
@@ -54,6 +60,7 @@ class RecordingTracer(AzureAIOpenTelemetryTracer):
             kind=kind,
             parent_run_id=parent_run_id,
             attributes=attributes,
+            thread_key=thread_key,
         )
         self._span_names[str(run_id)] = name
 
@@ -118,17 +125,181 @@ def test_basic_agent_tracing_records_spans() -> None:
     assert result["messages"][-1].content == "It's always sunny!"
     span_names = [span.name for span in tracer.completed_spans]
     assert any(name.startswith("invoke_agent") for name in span_names)
-    chat_span = next(
-        span for span in tracer.completed_spans if span.operation == "chat"
+
+
+@pytest.mark.asyncio
+@pytest.mark.block_network()
+async def test_trace_all_nodes_records_unlabeled_graph() -> None:
+    """Tracer should emit spans for every node when trace_all_langgraph_nodes=True."""
+    tracer = RecordingTracer(
+        enable_content_recording=True,
+        name="trace-all",
+        trace_all_langgraph_nodes=True,
+        message_paths=("chat_history",),
     )
-    assert chat_span.attributes.get(Attrs.OPERATION_NAME) == "chat"
-    root_span = next(
+
+    @dataclass
+    class State:
+        chat_history: List[Any]
+
+    async def gather(state: State, runtime: Any | None = None) -> Dict[str, Any]:
+        return {
+            "chat_history": state.chat_history
+            + [{"role": "assistant", "content": "gathered"}]
+        }
+
+    async def summarize(state: State, runtime: Any | None = None) -> Dict[str, Any]:
+        return {
+            "chat_history": state.chat_history
+            + [{"role": "assistant", "content": "summarized"}]
+        }
+
+    graph = (
+        StateGraph(State)
+        .add_node("gather", gather)
+        .add_node("summarize", summarize)
+        .add_edge(START, "gather")
+        .add_edge("gather", "summarize")
+        .add_edge("summarize", END)
+        .compile(name="trace-all-graph")
+        .with_config({"callbacks": [tracer]})
+    )
+
+    await graph.ainvoke(State(chat_history=[{"role": "user", "content": "hi"}]))
+
+    span_names = [span.name for span in tracer.completed_spans]
+    assert any("gather" in name for name in span_names)
+    assert any("summarize" in name for name in span_names)
+
+
+@pytest.mark.asyncio
+@pytest.mark.block_network()
+async def test_metadata_message_path_records_wrapped_state() -> None:
+    """Node-level otel_messages_path should extract nested dataclass state."""
+    tracer = RecordingTracer(enable_content_recording=True, name="wrapped-state")
+
+    @dataclass
+    class WrappedState:
+        payload: Dict[str, Any]
+
+    async def enrich(state: WrappedState, runtime: Any | None = None) -> Dict[str, Any]:
+        history = state.payload["messages"]
+        return {
+            "payload": {
+                "messages": history + [{"role": "assistant", "content": "wrapped"}]
+            }
+        }
+
+    graph = (
+        StateGraph(WrappedState)
+        .add_node(
+            "enrich",
+            enrich,
+            metadata={
+                "otel_trace": True,
+                "otel_messages_path": "payload.messages",
+                "langgraph_node": "enrich",
+            },
+        )
+        .add_edge(START, "enrich")
+        .add_edge("enrich", END)
+        .compile(name="wrapped-state-graph")
+        .with_config({"callbacks": [tracer]})
+    )
+
+    await graph.ainvoke(WrappedState(payload={"messages": [{"role": "user", "content": "hi"}]}))
+
+    span = next(span for span in tracer.completed_spans if "enrich" in span.name)
+    input_messages = json.loads(span.attributes[Attrs.INPUT_MESSAGES])
+    assert input_messages[0]["parts"][0]["content"] == "hi"
+    assert span.attributes.get("metadata.langgraph_node") == "enrich"
+
+
+class _StaticRetriever(BaseRetriever):
+    docs: List[Document]
+    tags: List[str] = []
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    def _get_relevant_documents(
+        self,
+        query: str,
+        *,
+        run_manager: RunnableConfig | None = None,
+    ) -> List[Document]:
+        return self.docs
+
+    async def _aget_relevant_documents(
+        self,
+        query: str,
+        *,
+        run_manager: RunnableConfig | None = None,
+    ) -> List[Document]:
+        return self.docs
+
+
+@pytest.mark.block_network()
+def test_static_retriever_records_results() -> None:
+    """Ensure retriever spans record queries and documents."""
+    tracer = RecordingTracer(enable_content_recording=True, name="retriever")
+    docs = [
+        Document(page_content="alpha", metadata={"chunk": 1}),
+        Document(page_content="beta", metadata={"chunk": 2}),
+    ]
+    retriever = _StaticRetriever(docs=docs)
+
+    retriever.invoke("alpha", config={"callbacks": [tracer]})
+
+    span = next(
         span
         for span in tracer.completed_spans
-        if span.operation == "invoke_agent" and span.parent_run_id is None
+        if span.operation == "execute_tool" and span.attributes.get(Attrs.TOOL_TYPE) == "retriever"
     )
-    assert root_span.attributes.get(Attrs.AGENT_NAME) == "LangGraph"
-    assert chat_span.parent_run_id == root_span.run_id
+    assert span.attributes.get(Attrs.RETRIEVER_QUERY) == "alpha"
+    recorded = json.loads(span.attributes[Attrs.RETRIEVER_RESULTS])
+    assert recorded[0]["metadata"]["chunk"] == 1
+
+
+@tool
+def exploding_tool(text: str) -> str:
+    """Always raises an exception."""
+    raise ValueError("boom")
+
+
+@pytest.mark.block_network()
+def test_tool_error_span_records_status() -> None:
+    """ToolNode errors should emit execute_tool spans with error metadata."""
+    tracer = RecordingTracer(enable_content_recording=True, name="error-tool")
+    tool_node = ToolNode([exploding_tool])
+
+    graph = (
+        StateGraph(MessagesState)
+        .add_node(
+            "tools",
+            tool_node,
+            metadata={"otel_trace": True, "langgraph_node": "tools"},
+        )
+        .add_edge(START, "tools")
+        .add_edge("tools", END)
+        .compile(name="error-tool-graph")
+        .with_config({"callbacks": [tracer]})
+    )
+
+    ai_message = AIMessage(
+        content="",
+        tool_calls=[
+            ToolCall(id="call-1", name="exploding_tool", args={"text": "hi"})
+        ],
+    )
+
+    with pytest.raises(ValueError):
+        graph.invoke({"messages": [ai_message]})
+
+    span = next(
+        span
+        for span in tracer.completed_spans
+        if span.operation == "execute_tool" and "exploding_tool" in span.name
+    )
+    assert span.attributes.get(Attrs.TOOL_CALL_RESULT) is None
 
 
 @pytest.mark.block_network()
