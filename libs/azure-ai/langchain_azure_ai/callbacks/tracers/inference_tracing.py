@@ -28,6 +28,7 @@ import json
 import logging
 import os
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, is_dataclass
 from threading import Lock
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Union, cast
@@ -74,6 +75,38 @@ if _DEBUG_THREAD_STACK:
 _LANGGRAPH_GENERIC_NAME = "LangGraph"
 _LANGGRAPH_START_NODE = "__start__"
 _LANGGRAPH_MIDDLEWARE_PREFIX = "Middleware."
+_LANGCHAIN_TRACER_CONTEXT_VAR: ContextVar[BaseCallbackHandler | None] = ContextVar(
+    "azure_ai_genai_tracer_callback",
+    default=None,
+)
+
+# ---------------------------------------------------------------------------
+# Default configuration for static autolog() API
+# ---------------------------------------------------------------------------
+DEFAULT_CONFIG: Dict[str, Any] = {
+    "provider_name": None,  # Auto-infer if None
+    "tracer_name": "azure_ai_genai_tracer",
+    "enable_content_recording": True,
+    "redact_messages": False,
+    "redact_tool_arguments": False,
+    "redact_tool_results": False,
+    "include_tool_definitions": True,
+    "aggregate_usage": True,
+    "normalize_operation_names": True,
+    "sampling_rate": 1.0,
+    "honor_external_parent": True,
+    "patch_mode": "callback",  # "callback", "hybrid", or "monkey"
+    "log_stream_chunks": False,
+    "max_message_characters": None,  # Optional truncation
+    "thread_id_attribute": "gen_ai.conversation.id",
+    "enable_span_links": True,
+    "message_keys": ("messages",),
+    "message_paths": (),
+    "trace_all_langgraph_nodes": False,
+    "ignore_start_node": True,
+    "compat_create_agent_filtering": True,
+    "enable_performance_counters": None,
+}
 
 
 class Attrs:
@@ -1027,8 +1060,40 @@ class _SpanRecord:
 
 
 class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
-    """LangChain callback handler that emits OpenTelemetry GenAI spans."""
+    """LangChain callback handler that emits OpenTelemetry GenAI spans.
 
+    This tracer supports two usage patterns:
+
+    1. **Instance-based** (explicit callbacks):
+       ```python
+       tracer = AzureAIOpenTelemetryTracer(connection_string="...")
+       chain.invoke(input, config={"callbacks": [tracer]})
+       ```
+
+    2. **Static autolog** (zero-friction):
+       ```python
+       AzureAIOpenTelemetryTracer.set_app_insights("InstrumentationKey=...")
+       AzureAIOpenTelemetryTracer.set_config({"provider_name": "azure.ai.openai"})
+       AzureAIOpenTelemetryTracer.autolog()
+       # All LangChain/LangGraph executions now emit spans automatically
+       ```
+
+    The static API provides MLflow-style autolog() convenience while maintaining
+    full GenAI semantic convention compliance.
+    """
+
+    # -------------------------------------------------------------------------
+    # Class-level state for static autolog() API
+    # -------------------------------------------------------------------------
+    _GLOBAL_TRACER_INSTANCE: Optional["AzureAIOpenTelemetryTracer"] = None
+    _ACTIVE: bool = False
+    _GLOBAL_CONFIG: Dict[str, Any] = {}
+    _APP_INSIGHTS_CS: Optional[str] = None
+    _STATIC_LOCK: Lock = Lock()
+
+    # -------------------------------------------------------------------------
+    # Existing class-level state
+    # -------------------------------------------------------------------------
     _azure_monitor_configured: bool = False
     _configure_lock: Lock = Lock()
     _schema_url: str = Schemas.V1_28_0.value
@@ -1048,6 +1113,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         trace_all_langgraph_nodes: bool = False,
         ignore_start_node: bool = True,
         compat_create_agent_filtering: bool = True,
+        enable_performance_counters: Optional[bool] = None,
     ) -> None:
         """Initialize tracer state and configure Azure Monitor if needed."""
         super().__init__()
@@ -1070,7 +1136,10 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             connection_string = os.getenv("APPLICATION_INSIGHTS_CONNECTION_STRING")
 
         if connection_string:
-            self._configure_azure_monitor(connection_string)
+            monitor_kwargs: dict[str, Any] = {"connection_string": connection_string}
+            if enable_performance_counters is not None:
+                monitor_kwargs["enable_performance_counters"] = enable_performance_counters
+            self._configure_azure_monitor(**monitor_kwargs)
 
         self._spans: Dict[str, _SpanRecord] = {}
         self._lock = Lock()
@@ -2144,6 +2213,11 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         chat_run_key = str(run_id)
         if resolved_parent and resolved_parent in self._spans:
             self._spans[resolved_parent].stash["last_chat_run"] = chat_run_key
+            # Store the chat span's context so it can be used as parent for tool calls
+            # even after the chat span ends (since chat ends before tools start in LangChain)
+            chat_record = self._spans.get(chat_run_key)
+            if chat_record:
+                self._spans[resolved_parent].stash["last_chat_context"] = set_span_in_context(chat_record.span)
 
     def _start_span(
         self,
@@ -2170,11 +2244,22 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                 operation == "execute_tool"
                 and parent_record.operation == "invoke_agent"
             ):
+                # For tool execution, prefer the last chat span as parent
+                # This creates the hierarchy: invoke_agent -> chat -> execute_tool
                 last_chat = parent_record.stash.get("last_chat_run")
                 if last_chat and last_chat in self._spans:
+                    # Chat span is still active - use it as parent
                     actual_parent_record = self._spans[last_chat]
                     resolved_parent_key = last_chat
-            parent_context = set_span_in_context(actual_parent_record.span)
+                    parent_context = set_span_in_context(actual_parent_record.span)
+                elif "last_chat_context" in parent_record.stash:
+                    # Chat span has ended but we stored its context - use that
+                    parent_context = parent_record.stash["last_chat_context"]
+                    resolved_parent_key = last_chat  # Keep the chat run key for record
+                else:
+                    parent_context = set_span_in_context(actual_parent_record.span)
+            else:
+                parent_context = set_span_in_context(actual_parent_record.span)
         if resolved_parent_key is None:
             fallback_key = None
             if thread_str:
@@ -2292,9 +2377,416 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         self._run_parent_override.pop(str(run_id), None)
 
     @classmethod
-    def _configure_azure_monitor(cls, connection_string: str) -> None:
+    def _configure_azure_monitor(cls, *, connection_string: str, **kwargs: Any) -> None:
         with cls._configure_lock:
             if cls._azure_monitor_configured:
                 return
-            configure_azure_monitor(connection_string=connection_string)
+            configure_azure_monitor(connection_string=connection_string, **kwargs)
             cls._azure_monitor_configured = True
+
+    # -------------------------------------------------------------------------
+    # Static autolog() API - MLflow-style zero-friction instrumentation
+    # -------------------------------------------------------------------------
+
+    @classmethod
+    def set_app_insights(cls, connection_string: str) -> None:
+        """Configure Azure Application Insights connection string.
+
+        This can be called before or after autolog(). If called after autolog()
+        is already active, the Azure Monitor exporter will be configured
+        immediately.
+
+        Args:
+            connection_string: Azure Application Insights connection string
+                (e.g., "InstrumentationKey=...;IngestionEndpoint=...")
+        """
+        with cls._STATIC_LOCK:
+            cls._APP_INSIGHTS_CS = connection_string
+            # If autolog is already active, configure Azure Monitor immediately
+            if cls._ACTIVE and connection_string:
+                try:
+                    cls._configure_azure_monitor(connection_string=connection_string)
+                except Exception:
+                    LOGGER.exception("Failed configuring Azure Monitor after set_app_insights")
+
+    @classmethod
+    def set_config(cls, cfg: Dict[str, Any]) -> None:
+        """Merge user configuration into the global config store.
+
+        Configuration precedence (highest to lowest):
+        1. Per-call overrides passed to autolog()
+        2. Values from set_config()
+        3. Environment variables
+        4. DEFAULT_CONFIG
+
+        Args:
+            cfg: Dictionary of configuration options to merge.
+                See DEFAULT_CONFIG for available keys.
+        """
+        with cls._STATIC_LOCK:
+            if cfg:
+                # Validate keys against known config options
+                unknown_keys = set(cfg.keys()) - set(DEFAULT_CONFIG.keys())
+                if unknown_keys:
+                    LOGGER.warning(
+                        "Unknown configuration keys will be ignored: %s",
+                        unknown_keys,
+                    )
+                cls._GLOBAL_CONFIG.update(cfg)
+
+    @classmethod
+    def get_config(cls) -> Dict[str, Any]:
+        """Return the effective merged configuration.
+
+        Returns:
+            Dictionary containing all configuration options with precedence applied.
+        """
+        # Start with defaults, overlay global config
+        effective = dict(DEFAULT_CONFIG)
+        effective.update(cls._GLOBAL_CONFIG)
+
+        # Check environment variable overrides
+        env_mappings = {
+            "GENAI_REDACT_MESSAGES": ("redact_messages", lambda v: v.lower() in ("1", "true", "yes")),
+            "GENAI_REDACT_TOOL_ARGUMENTS": ("redact_tool_arguments", lambda v: v.lower() in ("1", "true", "yes")),
+            "GENAI_REDACT_TOOL_RESULTS": ("redact_tool_results", lambda v: v.lower() in ("1", "true", "yes")),
+            "GENAI_ENABLE_CONTENT_RECORDING": ("enable_content_recording", lambda v: v.lower() in ("1", "true", "yes")),
+            "GENAI_SAMPLING_RATE": ("sampling_rate", float),
+            "GENAI_PROVIDER_NAME": ("provider_name", str),
+        }
+        for env_var, (config_key, converter) in env_mappings.items():
+            env_value = os.getenv(env_var)
+            if env_value is not None:
+                try:
+                    effective[config_key] = converter(env_value)
+                except (ValueError, TypeError):
+                    LOGGER.warning(
+                        "Invalid value for environment variable %s: %s",
+                        env_var,
+                        env_value,
+                    )
+
+        return effective
+
+    @classmethod
+    def autolog(cls, **overrides: Any) -> None:
+        """Activate automatic instrumentation for all LangChain/LangGraph executions.
+
+        After calling this method, all LangChain chains, agents, and LangGraph
+        graphs will automatically emit OpenTelemetry spans without requiring
+        explicit `callbacks=[tracer]` configuration.
+
+        This method is idempotent - calling it multiple times will merge any
+        new overrides but not create duplicate tracers.
+
+        Args:
+            **overrides: Configuration overrides that take highest precedence.
+                See DEFAULT_CONFIG for available options.
+
+        Example:
+            >>> AzureAIOpenTelemetryTracer.set_app_insights("InstrumentationKey=...")
+            >>> AzureAIOpenTelemetryTracer.autolog(provider_name="azure.ai.openai")
+            >>> # All subsequent LangChain calls are now traced
+        """
+        with cls._STATIC_LOCK:
+            if cls._ACTIVE:
+                LOGGER.info(
+                    "AzureAIOpenTelemetryTracer.autolog() already active; "
+                    "merging overrides if provided."
+                )
+                if overrides:
+                    cls._GLOBAL_CONFIG.update(overrides)
+                    # Update the existing tracer's content recording setting if changed
+                    if cls._GLOBAL_TRACER_INSTANCE:
+                        effective = cls.get_config()
+                        cls._GLOBAL_TRACER_INSTANCE._content_recording = effective.get(
+                            "enable_content_recording", True
+                        ) and not effective.get("redact_messages", False)
+                return
+
+            # Merge overrides into global config
+            if overrides:
+                cls._GLOBAL_CONFIG.update(overrides)
+
+            effective = cls.get_config()
+
+            # Build tracer instance with effective config
+            instance = cls(
+                name=effective.get("tracer_name", "azure_ai_genai_tracer"),
+                provider_name=effective.get("provider_name"),
+                connection_string=cls._APP_INSIGHTS_CS,
+                enable_content_recording=effective.get("enable_content_recording", True)
+                and not effective.get("redact_messages", False),
+                message_keys=effective.get("message_keys", ("messages",)),
+                message_paths=effective.get("message_paths", ()),
+                trace_all_langgraph_nodes=effective.get("trace_all_langgraph_nodes", False),
+                ignore_start_node=effective.get("ignore_start_node", True),
+                compat_create_agent_filtering=effective.get("compat_create_agent_filtering", True),
+                enable_performance_counters=effective.get("enable_performance_counters"),
+            )
+
+            cls._GLOBAL_TRACER_INSTANCE = instance
+            cls._ACTIVE = True
+
+            # Register callback globally with LangChain
+            cls._register_global_callback(instance)
+
+            LOGGER.info(
+                "AzureAIOpenTelemetryTracer.autolog() activated with config: %s",
+                {k: v for k, v in effective.items() if k != "connection_string"},
+            )
+
+    @classmethod
+    def _register_global_callback(cls, instance: "AzureAIOpenTelemetryTracer") -> None:
+        """Register the tracer instance as a global callback handler.
+
+        This uses LangChain's callback manager to automatically include the
+        tracer in all chain/agent/graph invocations.
+        """
+        try:
+            from langchain_core.tracers.context import register_configure_hook
+
+            # Newer langchain_core uses ContextVar-based configure hooks.
+            # We register our own ContextVar and set it to the tracer instance so
+            # CallbackManager.configure() automatically includes it.
+            ctx_token = _LANGCHAIN_TRACER_CONTEXT_VAR.set(instance)
+            try:
+                register_configure_hook(_LANGCHAIN_TRACER_CONTEXT_VAR, inheritable=True)
+                cls._GLOBAL_CONFIG["_registered_hook"] = (
+                    "context_var",
+                    _LANGCHAIN_TRACER_CONTEXT_VAR,
+                )
+                cls._GLOBAL_CONFIG["_registered_hook_token"] = ctx_token
+                LOGGER.debug("Registered tracer via context-var configure hook")
+                return
+            except TypeError:
+                # Fall back to older langchain_core versions where
+                # register_configure_hook() accepts a hook function.
+                _LANGCHAIN_TRACER_CONTEXT_VAR.reset(ctx_token)
+
+            from langchain_core.callbacks.manager import CallbackManager
+
+            # Register a configure hook that adds our tracer to every run
+            def _add_tracer_hook(
+                local_callbacks: Any,
+                inheritable_callbacks: Any,
+                local_tags: Any,
+                inheritable_tags: Any,
+                local_metadata: Any,
+                inheritable_metadata: Any,
+            ) -> tuple:
+                """Hook that injects our tracer into callback configuration."""
+                # Add our tracer to inheritable callbacks
+                if inheritable_callbacks is None:
+                    inheritable_callbacks = [instance]
+                elif isinstance(inheritable_callbacks, list):
+                    if instance not in inheritable_callbacks:
+                        inheritable_callbacks = inheritable_callbacks + [instance]
+                elif isinstance(inheritable_callbacks, CallbackManager):
+                    if instance not in inheritable_callbacks.handlers:
+                        inheritable_callbacks.add_handler(instance, inherit=True)
+                return (
+                    local_callbacks,
+                    inheritable_callbacks,
+                    local_tags,
+                    inheritable_tags,
+                    local_metadata,
+                    inheritable_metadata,
+                )
+
+            register_configure_hook(_add_tracer_hook)
+            cls._GLOBAL_CONFIG["_registered_hook"] = ("hook_fn", _add_tracer_hook)
+            LOGGER.debug("Registered tracer via configure hook")
+
+        except ImportError:
+            LOGGER.warning(
+                "Could not import LangChain callback manager. "
+                "Global callback registration may not work as expected."
+            )
+        except Exception:
+            LOGGER.exception("Failed to register global callback handler")
+
+    @classmethod
+    def is_active(cls) -> bool:
+        """Check whether autolog() instrumentation is currently active.
+
+        Returns:
+            True if autolog() has been called and not yet shut down.
+        """
+        return cls._ACTIVE
+
+    @classmethod
+    def shutdown(cls) -> None:
+        """Deactivate instrumentation and flush pending spans.
+
+        This method:
+        1. Forces a flush of all pending spans to exporters
+        2. Removes the global callback registration
+        3. Clears internal state
+
+        It's safe to call autolog() again after shutdown().
+        """
+        with cls._STATIC_LOCK:
+            if not cls._ACTIVE:
+                LOGGER.debug("shutdown() called but autolog() was not active")
+                return
+
+            # Force flush the tracer provider
+            try:
+                provider = otel_trace.get_tracer_provider()
+                if hasattr(provider, "force_flush"):
+                    provider.force_flush(timeout_millis=5000)
+            except Exception:
+                LOGGER.debug("Tracer provider flush failed", exc_info=True)
+
+            # Clean up the global tracer instance
+            if cls._GLOBAL_TRACER_INSTANCE:
+                # End any dangling spans
+                for run_key in list(cls._GLOBAL_TRACER_INSTANCE._spans.keys()):
+                    try:
+                        record = cls._GLOBAL_TRACER_INSTANCE._spans.pop(run_key, None)
+                        if record:
+                            record.span.end()
+                    except Exception:
+                        LOGGER.debug("Failed to end span %s", run_key, exc_info=True)
+
+            # Unregister the configure hook if we registered one
+            registered_hook = cls._GLOBAL_CONFIG.pop("_registered_hook", None)
+            if registered_hook:
+                try:
+                    from langchain_core.tracers.context import (
+                        _configure_hooks,
+                    )
+                    if (
+                        isinstance(registered_hook, tuple)
+                        and len(registered_hook) == 2
+                        and registered_hook[0] == "hook_fn"
+                    ):
+                        hook_fn = registered_hook[1]
+                        if hook_fn in _configure_hooks:
+                            _configure_hooks.remove(hook_fn)
+                    elif (
+                        isinstance(registered_hook, tuple)
+                        and len(registered_hook) == 2
+                        and registered_hook[0] == "context_var"
+                    ):
+                        context_var = registered_hook[1]
+                        _configure_hooks[:] = [
+                            hook
+                            for hook in _configure_hooks
+                            if not (isinstance(hook, tuple) and hook and hook[0] is context_var)
+                        ]
+                        ctx_token = cls._GLOBAL_CONFIG.pop(
+                            "_registered_hook_token", None
+                        )
+                        if ctx_token is not None:
+                            try:
+                                context_var.reset(ctx_token)
+                            except Exception:
+                                LOGGER.debug(
+                                    "Failed to reset tracer context var",
+                                    exc_info=True,
+                                )
+                except Exception:
+                    LOGGER.debug("Failed to unregister configure hook", exc_info=True)
+
+            cls._GLOBAL_TRACER_INSTANCE = None
+            cls._ACTIVE = False
+
+            LOGGER.info("AzureAIOpenTelemetryTracer.shutdown() completed")
+
+    @classmethod
+    def add_tags(cls, tags: Dict[str, Any]) -> None:
+        """Add trace-level tags to root agent spans.
+
+        Tags are added to all currently active root spans (spans without a parent).
+        This is useful for adding request-specific metadata like user IDs or
+        session identifiers.
+
+        Args:
+            tags: Dictionary of tag names and values to add.
+        """
+        if not cls._ACTIVE or not tags:
+            return
+        inst = cls._GLOBAL_TRACER_INSTANCE
+        if not inst:
+            return
+        inst._add_root_tags(tags)
+
+    def _add_root_tags(self, tags: Dict[str, Any]) -> None:
+        """Instance method to add tags to root spans."""
+        for record in list(self._spans.values()):
+            if record.parent_run_id is None and record.operation == "invoke_agent":
+                for key, value in tags.items():
+                    try:
+                        record.span.set_attribute(key, value)
+                        record.attributes[key] = value
+                    except Exception:
+                        LOGGER.debug(
+                            "Failed to set tag %s on span", key, exc_info=True
+                        )
+
+    @classmethod
+    def update_redaction_rules(
+        cls,
+        *,
+        redact_messages: Optional[bool] = None,
+        redact_tool_arguments: Optional[bool] = None,
+        redact_tool_results: Optional[bool] = None,
+    ) -> None:
+        """Update redaction settings at runtime.
+
+        Changes take effect immediately for subsequent spans. Existing spans
+        are not modified.
+
+        Args:
+            redact_messages: If True, redact message content in spans.
+            redact_tool_arguments: If True, redact tool call arguments.
+            redact_tool_results: If True, redact tool call results.
+        """
+        with cls._STATIC_LOCK:
+            if redact_messages is not None:
+                cls._GLOBAL_CONFIG["redact_messages"] = redact_messages
+            if redact_tool_arguments is not None:
+                cls._GLOBAL_CONFIG["redact_tool_arguments"] = redact_tool_arguments
+            if redact_tool_results is not None:
+                cls._GLOBAL_CONFIG["redact_tool_results"] = redact_tool_results
+
+            # Update the active tracer instance if present
+            if cls._GLOBAL_TRACER_INSTANCE and redact_messages is not None:
+                effective = cls.get_config()
+                cls._GLOBAL_TRACER_INSTANCE._content_recording = (
+                    effective.get("enable_content_recording", True)
+                    and not effective.get("redact_messages", False)
+                )
+
+    @classmethod
+    def force_flush(cls, timeout_millis: int = 5000) -> bool:
+        """Force flush all pending spans to exporters.
+
+        This is useful after batch workflows to ensure all telemetry is
+        exported before the process exits.
+
+        Args:
+            timeout_millis: Maximum time to wait for flush completion.
+
+        Returns:
+            True if flush completed successfully, False otherwise.
+        """
+        try:
+            provider = otel_trace.get_tracer_provider()
+            if hasattr(provider, "force_flush"):
+                return provider.force_flush(timeout_millis=timeout_millis)
+            return True
+        except Exception:
+            LOGGER.debug("force_flush() failed", exc_info=True)
+            return False
+
+    @classmethod
+    def get_tracer_instance(cls) -> Optional["AzureAIOpenTelemetryTracer"]:
+        """Get the global tracer instance if autolog() is active.
+
+        Returns:
+            The active tracer instance, or None if autolog() has not been called.
+        """
+        return cls._GLOBAL_TRACER_INSTANCE if cls._ACTIVE else None

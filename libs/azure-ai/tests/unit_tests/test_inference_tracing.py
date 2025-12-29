@@ -12,6 +12,7 @@ from langchain_core.messages import (
     AIMessage,
     BaseMessage,
     HumanMessage,
+    SystemMessage,
     ToolMessage,
 )
 from langchain_core.outputs import ChatGeneration, LLMResult
@@ -82,9 +83,19 @@ class MockTracer:
         return span
 
 
+class MockTracerProvider:
+    """Mock tracer provider for testing."""
+
+    def force_flush(self, timeout_millis: int = 5000) -> bool:
+        return True
+
+
 @pytest.fixture(autouse=True)
 def patch_otel(monkeypatch: pytest.MonkeyPatch) -> None:
-    mock = SimpleNamespace(get_tracer=lambda *_, **__: MockTracer())
+    mock = SimpleNamespace(
+        get_tracer=lambda *_, **__: MockTracer(),
+        get_tracer_provider=lambda: MockTracerProvider(),
+    )
     monkeypatch.setattr(tracing, "otel_trace", mock)
     monkeypatch.setattr(tracing, "set_span_in_context", lambda span: None)
     monkeypatch.setattr(tracing, "get_current_span", lambda: None)
@@ -1387,3 +1398,648 @@ def test_pending_tool_call_cached_for_chain_end(
     tool_part = next(part for part in parts if part.get("type") == "tool_call_response")
     assert tool_part["id"] == "abc"
     assert tool_part["result"] == "result"
+
+
+# ---------------------------------------------------------------------------
+# Static autolog() API Tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def reset_static_state() -> Any:
+    """Reset static class state before and after each autolog test."""
+    # Reset before test
+    tracing.AzureAIOpenTelemetryTracer._GLOBAL_TRACER_INSTANCE = None
+    tracing.AzureAIOpenTelemetryTracer._ACTIVE = False
+    tracing.AzureAIOpenTelemetryTracer._GLOBAL_CONFIG = {}
+    tracing.AzureAIOpenTelemetryTracer._APP_INSIGHTS_CS = None
+    yield
+    # Reset after test
+    tracing.AzureAIOpenTelemetryTracer._GLOBAL_TRACER_INSTANCE = None
+    tracing.AzureAIOpenTelemetryTracer._ACTIVE = False
+    tracing.AzureAIOpenTelemetryTracer._GLOBAL_CONFIG = {}
+    tracing.AzureAIOpenTelemetryTracer._APP_INSIGHTS_CS = None
+
+
+def test_default_config_has_expected_keys() -> None:
+    """DEFAULT_CONFIG should contain all expected configuration keys."""
+    expected_keys = {
+        "provider_name",
+        "tracer_name",
+        "enable_content_recording",
+        "redact_messages",
+        "redact_tool_arguments",
+        "redact_tool_results",
+        "include_tool_definitions",
+        "aggregate_usage",
+        "normalize_operation_names",
+        "sampling_rate",
+        "honor_external_parent",
+        "patch_mode",
+        "log_stream_chunks",
+        "max_message_characters",
+        "thread_id_attribute",
+        "enable_span_links",
+        "message_keys",
+        "message_paths",
+        "trace_all_langgraph_nodes",
+        "ignore_start_node",
+        "compat_create_agent_filtering",
+        "enable_performance_counters",
+    }
+    assert set(tracing.DEFAULT_CONFIG.keys()) == expected_keys
+
+
+def test_set_config_and_get_config(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_static_state: Any,
+) -> None:
+    """set_config() should merge values and get_config() should return effective config."""
+    T = tracing.AzureAIOpenTelemetryTracer
+
+    # Get default config first
+    default = T.get_config()
+    assert default["provider_name"] is None
+    assert default["redact_messages"] is False
+
+    # Set some config values
+    T.set_config({"provider_name": "azure.ai.openai", "redact_messages": True})
+
+    effective = T.get_config()
+    assert effective["provider_name"] == "azure.ai.openai"
+    assert effective["redact_messages"] is True
+    # Other values should still be defaults
+    assert effective["enable_content_recording"] is True
+
+
+def test_set_config_warns_on_unknown_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_static_state: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """set_config() should warn about unknown configuration keys."""
+    import logging
+    caplog.set_level(logging.WARNING)
+    T = tracing.AzureAIOpenTelemetryTracer
+    T.set_config({"unknown_key": "value", "another_unknown": 123})
+    assert "unknown_key" in caplog.text or "Unknown configuration" in caplog.text
+
+
+def test_get_config_respects_env_vars(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_static_state: Any,
+) -> None:
+    """Environment variables should override defaults in get_config()."""
+    T = tracing.AzureAIOpenTelemetryTracer
+
+    monkeypatch.setenv("GENAI_REDACT_MESSAGES", "true")
+    monkeypatch.setenv("GENAI_SAMPLING_RATE", "0.5")
+    monkeypatch.setenv("GENAI_PROVIDER_NAME", "test_provider")
+
+    config = T.get_config()
+    assert config["redact_messages"] is True
+    assert config["sampling_rate"] == 0.5
+    assert config["provider_name"] == "test_provider"
+
+
+def test_set_app_insights_stores_connection_string(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_static_state: Any,
+) -> None:
+    """set_app_insights() should store the connection string."""
+    T = tracing.AzureAIOpenTelemetryTracer
+
+    cs = "InstrumentationKey=test;IngestionEndpoint=https://test"
+    T.set_app_insights(cs)
+
+    assert T._APP_INSIGHTS_CS == cs
+
+
+def _mock_register_callback(inst: Any) -> None:
+    """Mock callback registration that does nothing."""
+    pass
+
+
+def test_is_active_reflects_state(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_static_state: Any,
+) -> None:
+    """is_active() should reflect whether autolog() has been called."""
+    T = tracing.AzureAIOpenTelemetryTracer
+
+    # Mock the register function to avoid LangChain dependency issues
+    monkeypatch.setattr(
+        T, "_register_global_callback", classmethod(lambda cls, inst: None)
+    )
+
+    assert T.is_active() is False
+
+    T.autolog()
+    assert T.is_active() is True
+
+    T.shutdown()
+    assert T.is_active() is False
+
+
+def test_autolog_activation_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_static_state: Any,
+) -> None:
+    """Calling autolog() multiple times should keep one tracer instance."""
+    T = tracing.AzureAIOpenTelemetryTracer
+
+    # Mock the register function
+    monkeypatch.setattr(
+        T, "_register_global_callback", classmethod(lambda cls, inst: None)
+    )
+
+    T.autolog(provider_name="first")
+    first_instance = T._GLOBAL_TRACER_INSTANCE
+
+    # Second call should merge config but not create new instance
+    T.autolog(provider_name="second")
+    second_instance = T._GLOBAL_TRACER_INSTANCE
+
+    assert first_instance is second_instance
+    assert T._GLOBAL_CONFIG.get("provider_name") == "second"
+
+
+def test_shutdown_cleans_state(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_static_state: Any,
+) -> None:
+    """shutdown() should clean up all state."""
+    T = tracing.AzureAIOpenTelemetryTracer
+
+    # Mock the register function
+    monkeypatch.setattr(
+        T, "_register_global_callback", classmethod(lambda cls, inst: None)
+    )
+
+    T.autolog()
+    assert T._GLOBAL_TRACER_INSTANCE is not None
+    assert T._ACTIVE is True
+
+    T.shutdown()
+    assert T._GLOBAL_TRACER_INSTANCE is None
+    assert T._ACTIVE is False
+
+
+def test_get_tracer_instance_returns_tracer_when_active(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_static_state: Any,
+) -> None:
+    """get_tracer_instance() should return the tracer when active."""
+    T = tracing.AzureAIOpenTelemetryTracer
+
+    # Mock the register function
+    monkeypatch.setattr(
+        T, "_register_global_callback", classmethod(lambda cls, inst: None)
+    )
+
+    assert T.get_tracer_instance() is None
+
+    T.autolog()
+    instance = T.get_tracer_instance()
+    assert instance is not None
+    assert isinstance(instance, T)
+
+    T.shutdown()
+    assert T.get_tracer_instance() is None
+
+
+def test_update_redaction_rules_modifies_config(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_static_state: Any,
+) -> None:
+    """update_redaction_rules() should modify redaction settings."""
+    T = tracing.AzureAIOpenTelemetryTracer
+
+    # Mock the register function
+    monkeypatch.setattr(
+        T, "_register_global_callback", classmethod(lambda cls, inst: None)
+    )
+
+    T.autolog()
+
+    # Initially not redacting
+    assert T._GLOBAL_CONFIG.get("redact_messages") is None or T._GLOBAL_CONFIG.get("redact_messages") is False
+
+    # Enable redaction
+    T.update_redaction_rules(redact_messages=True, redact_tool_arguments=True)
+
+    assert T._GLOBAL_CONFIG["redact_messages"] is True
+    assert T._GLOBAL_CONFIG["redact_tool_arguments"] is True
+
+    # Tracer instance should reflect the change
+    instance = T.get_tracer_instance()
+    assert instance is not None
+    assert instance._content_recording is False  # Should be disabled when redacting
+
+
+def test_add_tags_adds_to_root_spans(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_static_state: Any,
+) -> None:
+    """add_tags() should add attributes to root spans."""
+    T = tracing.AzureAIOpenTelemetryTracer
+
+    # Mock the register function
+    monkeypatch.setattr(
+        T, "_register_global_callback", classmethod(lambda cls, inst: None)
+    )
+
+    T.autolog()
+    instance = T.get_tracer_instance()
+    assert instance is not None
+
+    # Create a mock root span by starting a chain
+    run_id = uuid4()
+    instance.on_chain_start(
+        {},
+        {"messages": [{"role": "user", "content": "hi"}]},
+        run_id=run_id,
+        metadata={"otel_trace": True},
+    )
+
+    # Add tags
+    T.add_tags({"user.id": "test-user", "session.type": "demo"})
+
+    # Verify tags were added to the span
+    span = get_last_span_for(instance)
+    assert span.attributes.get("user.id") == "test-user"
+    assert span.attributes.get("session.type") == "demo"
+
+
+def test_force_flush_handles_no_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_static_state: Any,
+) -> None:
+    """force_flush() should handle cases where provider doesn't have force_flush."""
+    T = tracing.AzureAIOpenTelemetryTracer
+
+    # Mock provider without force_flush - override the global mock
+    mock_provider_no_flush = SimpleNamespace()
+    mock_otel = SimpleNamespace(
+        get_tracer=lambda *_, **__: MockTracer(),
+        get_tracer_provider=lambda: mock_provider_no_flush,
+    )
+    monkeypatch.setattr(tracing, "otel_trace", mock_otel)
+
+    result = T.force_flush()
+    assert result is True  # Should return True if no force_flush method
+
+
+def test_autolog_uses_effective_config(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_static_state: Any,
+) -> None:
+    """autolog() should use merged effective configuration."""
+    T = tracing.AzureAIOpenTelemetryTracer
+
+    # Mock the register function
+    monkeypatch.setattr(
+        T, "_register_global_callback", classmethod(lambda cls, inst: None)
+    )
+
+    # Pre-configure
+    T.set_config({
+        "provider_name": "azure.ai.openai",
+        "message_keys": ("chat_history",),
+    })
+
+    # Override at autolog time
+    T.autolog(trace_all_langgraph_nodes=True)
+
+    instance = T.get_tracer_instance()
+    assert instance is not None
+    assert instance._default_provider_name == "azure.ai.openai"
+    assert instance._message_keys == ("chat_history",)
+    assert instance._trace_all_langgraph_nodes is True
+
+
+def test_shutdown_is_safe_when_not_active(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_static_state: Any,
+) -> None:
+    """shutdown() should be safe to call even when not active."""
+    T = tracing.AzureAIOpenTelemetryTracer
+
+    # Should not raise
+    T.shutdown()
+    assert T._ACTIVE is False
+
+
+def test_add_tags_noop_when_inactive(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_static_state: Any,
+) -> None:
+    """add_tags() should be a no-op when autolog is not active."""
+    T = tracing.AzureAIOpenTelemetryTracer
+
+    # Should not raise
+    T.add_tags({"key": "value"})
+
+
+def test_update_redaction_rules_noop_when_inactive(
+    monkeypatch: pytest.MonkeyPatch,
+    reset_static_state: Any,
+) -> None:
+    """update_redaction_rules() should still update config even when inactive."""
+    T = tracing.AzureAIOpenTelemetryTracer
+
+    T.update_redaction_rules(redact_messages=True)
+    assert T._GLOBAL_CONFIG["redact_messages"] is True
+
+
+def test_tool_execution_uses_chat_span_as_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tool execution spans should use the chat span as parent, not invoke_agent.
+
+    This verifies the hierarchy: invoke_agent -> chat -> execute_tool
+    """
+    t = tracing.AzureAIOpenTelemetryTracer(enable_content_recording=True)
+
+    # Start invoke_agent span
+    agent_run_id = uuid4()
+    t.on_chain_start(
+        {},
+        {"messages": [{"role": "user", "content": "weather?"}]},
+        run_id=agent_run_id,
+        metadata={"otel_trace": True, "agent_name": "TestAgent"},
+    )
+    agent_record = t._spans.get(str(agent_run_id))
+    assert agent_record is not None
+    assert agent_record.operation == "invoke_agent"
+
+    # Start chat span (child of invoke_agent)
+    chat_run_id = uuid4()
+    t.on_chat_model_start(
+        {"kwargs": {"model": "gpt-4"}},
+        [[HumanMessage(content="weather?")]],
+        run_id=chat_run_id,
+        parent_run_id=agent_run_id,
+    )
+    chat_record = t._spans.get(str(chat_run_id))
+    assert chat_record is not None
+    assert chat_record.operation == "chat"
+    assert chat_record.parent_run_id == str(agent_run_id)
+
+    # Verify that last_chat_context is stored in invoke_agent's stash
+    assert "last_chat_context" in agent_record.stash
+
+    # End chat span (simulating LLM returning with tool calls)
+    from langchain_core.outputs import ChatGeneration, LLMResult
+    from langchain_core.messages.tool import ToolCall
+
+    llm_result = LLMResult(
+        generations=[
+            [
+                ChatGeneration(
+                    message=AIMessage(
+                        content="",
+                        tool_calls=[ToolCall(name="get_weather", args={"city": "NYC"}, id="call_1")],
+                    ),
+                    generation_info={"finish_reason": "tool_calls"},
+                )
+            ]
+        ],
+        llm_output={"model_name": "gpt-4"},
+    )
+    t.on_llm_end(llm_result, run_id=chat_run_id, parent_run_id=agent_run_id)
+
+    # Chat span should be ended and removed from _spans
+    assert str(chat_run_id) not in t._spans
+
+    # But the chat context should still be stored
+    assert "last_chat_context" in agent_record.stash
+    assert agent_record.stash.get("last_chat_run") == str(chat_run_id)
+
+    # Now start tool execution (should use stored chat context as parent)
+    tool_run_id = uuid4()
+    t.on_tool_start(
+        {"name": "get_weather"},
+        '{"city": "NYC"}',
+        run_id=tool_run_id,
+        parent_run_id=agent_run_id,  # LangChain passes invoke_agent as parent
+    )
+    tool_record = t._spans.get(str(tool_run_id))
+    assert tool_record is not None
+    assert tool_record.operation == "execute_tool"
+
+    # Key assertion: tool's parent should be the chat span (via stored context),
+    # not the invoke_agent span
+    assert tool_record.parent_run_id == str(chat_run_id), (
+        f"Tool's parent should be chat ({chat_run_id}), "
+        f"not invoke_agent ({agent_run_id})"
+    )
+
+
+def test_genai_span_hierarchy_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify complete GenAI semantic convention span hierarchy.
+
+    Expected hierarchy per GenAI spec:
+    invoke_agent (root)
+    ├── chat (first LLM call that decides to use tools)
+    │   └── execute_tool (tool execution as child of chat)
+    └── chat (second LLM call with tool results)
+    """
+    t = tracing.AzureAIOpenTelemetryTracer(enable_content_recording=True)
+    span_hierarchy: List[Tuple[str, Optional[str]]] = []
+
+    # Track span creation
+    original_start = t._start_span
+
+    def tracking_start(run_id, name, *, operation, kind, parent_run_id, attributes=None, thread_key=None):
+        original_start(run_id, name, operation=operation, kind=kind, parent_run_id=parent_run_id, attributes=attributes, thread_key=thread_key)
+        record = t._spans.get(str(run_id))
+        if record:
+            span_hierarchy.append((operation, record.parent_run_id))
+
+    t._start_span = tracking_start
+
+    # Simulate agent flow: invoke_agent -> chat -> tool -> chat
+    from langchain_core.outputs import ChatGeneration, LLMResult
+    from langchain_core.messages.tool import ToolCall
+
+    agent_id = uuid4()
+    chat1_id = uuid4()
+    tool_id = uuid4()
+    chat2_id = uuid4()
+
+    # 1. Start invoke_agent
+    t.on_chain_start({}, {"messages": []}, run_id=agent_id, metadata={"otel_trace": True})
+
+    # 2. Start first chat
+    t.on_chat_model_start({"kwargs": {}}, [[]], run_id=chat1_id, parent_run_id=agent_id)
+
+    # 3. End first chat (with tool call)
+    t.on_llm_end(
+        LLMResult(generations=[[ChatGeneration(
+            message=AIMessage(content="", tool_calls=[ToolCall(name="tool", args={}, id="c1")]),
+            generation_info={},
+        )]], llm_output={}),
+        run_id=chat1_id, parent_run_id=agent_id
+    )
+
+    # 4. Start tool execution
+    t.on_tool_start({"name": "tool"}, "{}", run_id=tool_id, parent_run_id=agent_id)
+
+    # 5. End tool execution
+    t.on_tool_end("result", run_id=tool_id, parent_run_id=agent_id)
+
+    # 6. Start second chat (with tool results)
+    t.on_chat_model_start({"kwargs": {}}, [[]], run_id=chat2_id, parent_run_id=agent_id)
+
+    # 7. End second chat
+    t.on_llm_end(
+        LLMResult(generations=[[ChatGeneration(
+            message=AIMessage(content="Final answer"),
+            generation_info={},
+        )]], llm_output={}),
+        run_id=chat2_id, parent_run_id=agent_id
+    )
+
+    # 8. End invoke_agent
+    t.on_chain_end({}, run_id=agent_id)
+
+    # Verify hierarchy
+    assert len(span_hierarchy) >= 4, f"Expected at least 4 spans, got {len(span_hierarchy)}"
+
+    # Find key spans
+    agent_entry = next((op, parent) for op, parent in span_hierarchy if op == "invoke_agent")
+    chat1_entry = span_hierarchy[1]  # First chat
+    tool_entry = next((op, parent) for op, parent in span_hierarchy if op == "execute_tool")
+    chat2_entry = next((op, parent) for op, parent in span_hierarchy[3:] if op == "chat")
+
+    # Verify relationships
+    assert agent_entry[1] is None, "invoke_agent should be root (no parent)"
+    assert chat1_entry[0] == "chat", "Second span should be chat"
+    assert chat1_entry[1] == str(agent_id), "First chat should have invoke_agent as parent"
+    assert tool_entry[1] == str(chat1_id), "Tool should have first chat as parent (not invoke_agent)"
+    assert chat2_entry[1] == str(agent_id), "Second chat should have invoke_agent as parent"
+
+
+def test_input_output_messages_set_correctly() -> None:
+    """Verify gen_ai.input.messages and gen_ai.output.messages are set per GenAI spec.
+
+    According to GenAI semantic conventions:
+    - Input messages should be set at span start with user/assistant/tool messages
+    - Output messages should be set at span end with assistant responses
+    - System instructions should be extracted separately
+    """
+    t = tracing.AzureAIOpenTelemetryTracer(enable_content_recording=True)
+
+    run_id = uuid4()
+    parent_id = uuid4()
+
+    # Start invoke_agent first
+    t.on_chain_start(
+        {},
+        {"messages": [{"role": "user", "content": "Hello"}]},
+        run_id=parent_id,
+        metadata={"otel_trace": True, "agent_name": "TestAgent"},
+    )
+
+    # Start chat model with messages
+    t.on_chat_model_start(
+        {"kwargs": {"model": "gpt-4"}},
+        [[
+            SystemMessage(content="You are a helpful assistant."),
+            HumanMessage(content="What is the weather?"),
+        ]],
+        run_id=run_id,
+        parent_run_id=parent_id,
+    )
+
+    # Get the MockSpan from the tracer (uses our mock infrastructure)
+    chat_span = get_last_span_for(t)
+    assert chat_span is not None
+
+    # Verify input messages attribute is set on the MockSpan
+    input_msgs = chat_span.attributes.get(tracing.Attrs.INPUT_MESSAGES)
+    assert input_msgs is not None, "gen_ai.input.messages should be set on chat start"
+
+    # Parse and verify structure
+    parsed_input = json.loads(input_msgs)
+    assert len(parsed_input) == 1, "Should have 1 user message (system extracted separately)"
+    assert parsed_input[0]["role"] == "user"
+    assert any("weather" in str(part.get("content", "")).lower() for part in parsed_input[0]["parts"])
+
+    # Verify system instructions are extracted
+    system_instr = chat_span.attributes.get(tracing.Attrs.SYSTEM_INSTRUCTIONS)
+    assert system_instr is not None, "gen_ai.system_instructions should be set"
+    parsed_system = json.loads(system_instr)
+    assert any("helpful assistant" in str(part.get("content", "")).lower() for part in parsed_system)
+
+    # End chat with output
+    llm_result = LLMResult(
+        generations=[[
+            ChatGeneration(
+                message=AIMessage(content="The weather is sunny."),
+                generation_info={"finish_reason": "stop"},
+            )
+        ]],
+        llm_output={"model_name": "gpt-4"},
+    )
+
+    t.on_llm_end(llm_result, run_id=run_id, parent_run_id=parent_id)
+
+    # Verify output messages were set on the span
+    output_msgs = chat_span.attributes.get(tracing.Attrs.OUTPUT_MESSAGES)
+    assert output_msgs is not None, "gen_ai.output.messages should be set on chat end"
+
+    parsed_output = json.loads(output_msgs)
+    assert len(parsed_output) == 1, "Should have 1 assistant message"
+    assert parsed_output[0]["role"] == "assistant"
+    assert any("sunny" in str(part.get("content", "")).lower() for part in parsed_output[0]["parts"])
+
+
+def test_invoke_agent_messages_propagation() -> None:
+    """Verify invoke_agent spans properly capture and propagate messages."""
+    import json
+    t = tracing.AzureAIOpenTelemetryTracer(enable_content_recording=True)
+
+    run_id = uuid4()
+
+    # Start invoke_agent with user message
+    t.on_chain_start(
+        {},
+        {"messages": [
+            {"role": "system", "content": "Agent system prompt"},
+            {"role": "user", "content": "Plan my vacation"},
+        ]},
+        run_id=run_id,
+        metadata={"otel_trace": True, "agent_name": "TravelAgent"},
+    )
+
+    record = t._spans.get(str(run_id))
+    assert record is not None
+    assert record.operation == "invoke_agent"
+
+    # Verify input messages are set on agent span
+    input_msgs = record.attributes.get(tracing.Attrs.INPUT_MESSAGES)
+    assert input_msgs is not None, "invoke_agent should have gen_ai.input.messages"
+
+    parsed = json.loads(input_msgs)
+    # Should have user message (system extracted separately)
+    user_msgs = [m for m in parsed if m["role"] == "user"]
+    assert len(user_msgs) == 1, "Should have 1 user message"
+
+    # Verify system instructions extracted
+    system_instr = record.attributes.get(tracing.Attrs.SYSTEM_INSTRUCTIONS)
+    assert system_instr is not None, "invoke_agent should have gen_ai.system_instructions"
+
+    # End invoke_agent with response
+    t.on_chain_end(
+        {"messages": [
+            {"role": "assistant", "content": "Here is your vacation plan..."},
+        ]},
+        run_id=run_id,
+    )
+
+    # Verify the span was ended (removed from _spans)
+    assert str(run_id) not in t._spans
