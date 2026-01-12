@@ -353,7 +353,12 @@ def test_multi_turn_conversation_with_thread_id() -> None:
     assert result1["messages"][-1].content == "Hello! How can I help?"
 
     # Second turn
-    input2: MessagesState = {"messages": result1["messages"] + [HumanMessage(content="What's the weather?")]}
+    input2: MessagesState = {
+        "messages": [
+            *result1["messages"],
+            HumanMessage(content="What's the weather?"),
+        ]
+    }
     result2 = app.invoke(cast(Any, input2), config=config)
     assert result2["messages"][-1].content == "The weather is sunny."
 

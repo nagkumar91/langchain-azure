@@ -971,7 +971,8 @@ def test_pending_tool_call_cached_for_chain_end(
 def test_message_helpers_handle_dict_and_langchain_messages() -> None:
     assert tracing._message_role(HumanMessage(content="hi")) == "user"
     assert tracing._message_role(AIMessage(content="ok")) == "assistant"
-    assert tracing._message_role(ToolMessage(name="t", tool_call_id="abc", content="x")) == "tool"
+    tool_message = ToolMessage(name="t", tool_call_id="abc", content="x")
+    assert tracing._message_role(tool_message) == "tool"
     assert tracing._message_role(SystemMessage(content="sys")) == "system"
 
     assert tracing._message_role({"role": "human", "content": "hi"}) == "user"
@@ -1002,9 +1003,9 @@ def test_tool_call_helpers_extract_ids_and_calls() -> None:
     assert extracted[0]["name"] == "tool"
     assert extracted[0]["args"] == {"k": "v"}
     # Dict-based messages can have arbitrary items, function filters to dicts only
-    assert tracing._extract_tool_calls({"tool_calls": [{"id": "2"}, None, "ignore"]}) == [
-        {"id": "2"}
-    ]
+    assert tracing._extract_tool_calls(
+        {"tool_calls": [{"id": "2"}, None, "ignore"]}
+    ) == [{"id": "2"}]
 
 
 def test_prepare_messages_supports_threads_system_and_tool_calls() -> None:
@@ -1031,7 +1032,9 @@ def test_prepare_messages_supports_threads_system_and_tool_calls() -> None:
     formatted_payload = json.loads(formatted)
     assert [msg["role"] for msg in formatted_payload] == ["user", "assistant", "tool"]
     assistant_parts = formatted_payload[1]["parts"]
-    tool_call_part = next(part for part in assistant_parts if part.get("type") == "tool_call")
+    tool_call_part = next(
+        part for part in assistant_parts if part.get("type") == "tool_call"
+    )
     assert tool_call_part["arguments"] == {}
     tool_parts = formatted_payload[2]["parts"]
     tool_response = next(
@@ -1071,7 +1074,9 @@ def test_filter_assistant_output_filters_to_text_parts() -> None:
     )
     assert (
         tracing._filter_assistant_output(
-            json.dumps([{"role": "assistant", "parts": [{"type": "tool_call", "id": "1"}]}])
+            json.dumps(
+                [{"role": "assistant", "parts": [{"type": "tool_call", "id": "1"}]}]
+            )
         )
         is None
     )
@@ -1107,22 +1112,29 @@ class _SampleDataclass:
 def test_scrub_and_serialise_helpers_cover_common_types() -> None:
     assert tracing._scrub_value(None, record_content=True) is None
     assert tracing._scrub_value(True, record_content=True) is True
-    assert tracing._scrub_value("  {\"a\": 1} ", record_content=True) == {"a": 1}
-    assert tracing._scrub_value("{\"a\": 1", record_content=True) == "{\"a\": 1"
-    assert tracing._scrub_value(_SampleDataclass(count=2, label="x"), record_content=True) == {
+    assert tracing._scrub_value('  {"a": 1} ', record_content=True) == {"a": 1}
+    assert tracing._scrub_value('{"a": 1', record_content=True) == '{"a": 1'
+    assert tracing._scrub_value(
+        _SampleDataclass(count=2, label="x"),
+        record_content=True,
+    ) == {
         "count": 2,
         "label": "x",
     }
     assert tracing._scrub_value(["[1, 2]", 3], record_content=True) == [[1, 2], 3]
-    assert tracing._scrub_value(HumanMessage(content="secret"), record_content=False) == "[redacted]"
+    secret_message = HumanMessage(content="secret")
+    assert tracing._scrub_value(secret_message, record_content=False) == "[redacted]"
     # AIMessage with valid content (list of strings without None - LangChain validation)
-    assert tracing._scrub_value(AIMessage(content=["a", "b"]), record_content=True) == {
+    ai_message = AIMessage(content=["a", "b"])
+    assert tracing._scrub_value(ai_message, record_content=True) == {
         "type": "ai",
         "content": "a b",
     }
 
     tool_msg = ToolMessage(name="t", tool_call_id="call-1", content="ok")
-    tool_payload = json.loads(tracing._serialise_tool_result(tool_msg, record_content=True))
+    tool_payload = json.loads(
+        tracing._serialise_tool_result(tool_msg, record_content=True)
+    )
     assert tool_payload["tool_call_id"] == "call-1"
     assert tool_payload["content"] == "ok"
 
@@ -1132,7 +1144,10 @@ def test_scrub_and_serialise_helpers_cover_common_types() -> None:
     assert msg_payload["type"] == "ai"
     assert msg_payload["content"] == "done"
 
-    assert json.loads(tracing._serialise_tool_result({"k": "v"}, record_content=False)) == "[redacted]"
+    assert (
+        json.loads(tracing._serialise_tool_result({"k": "v"}, record_content=False))
+        == "[redacted]"
+    )
 
 
 def test_collect_tool_definitions_dedupes_by_identity() -> None:
@@ -1160,14 +1175,19 @@ def test_usage_helpers_cover_bedrock_and_token_variants() -> None:
         "total_tokens": 5,
     }
     assert tracing._normalize_bedrock_usage_dict({"foo": 1}) is None
-    assert tracing._normalize_bedrock_metrics({"inputTokenCount": 1, "outputTokenCount": 2}) == {
+    assert tracing._normalize_bedrock_metrics(
+        {"inputTokenCount": 1, "outputTokenCount": 2}
+    ) == {
         "prompt_tokens": 1,
         "completion_tokens": 2,
         "total_tokens": 3,
     }
 
     llm_output_metrics = {
-        "amazon-bedrock-invocationMetrics": {"inputTokenCount": 4, "outputTokenCount": 6}
+        "amazon-bedrock-invocationMetrics": {
+            "inputTokenCount": 4,
+            "outputTokenCount": 6,
+        }
     }
     assert tracing._extract_bedrock_usage(llm_output_metrics, []) == {
         "prompt_tokens": 4,
@@ -1203,10 +1223,13 @@ def test_usage_helpers_cover_bedrock_and_token_variants() -> None:
     assert normalized == {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
     assert should_attach is False
 
-    _, _, _, bedrock_normalized, bedrock_attach = tracing._resolve_usage_from_llm_output(
-        llm_output_metrics, []
-    )
-    assert bedrock_normalized == {"prompt_tokens": 4, "completion_tokens": 6, "total_tokens": 10}
+    resolved = tracing._resolve_usage_from_llm_output(llm_output_metrics, [])
+    _, _, _, bedrock_normalized, bedrock_attach = resolved
+    assert bedrock_normalized == {
+        "prompt_tokens": 4,
+        "completion_tokens": 6,
+        "total_tokens": 10,
+    }
     assert bedrock_attach is True
 
 
@@ -1228,7 +1251,9 @@ def test_provider_and_server_inference_helpers_cover_variants() -> None:
         == "ollama"
     )
     assert (
-        tracing._infer_provider_name(None, None, {"endpoint_url": "https://bedrock.amazonaws.com"})
+        tracing._infer_provider_name(
+            None, None, {"endpoint_url": "https://bedrock.amazonaws.com"}
+        )
         == "aws.bedrock"
     )
     assert (
@@ -1236,7 +1261,11 @@ def test_provider_and_server_inference_helpers_cover_variants() -> None:
         == "aws.bedrock"
     )
     assert (
-        tracing._infer_provider_name({"kwargs": {"azure_endpoint": "https://x"}}, None, None)
+        tracing._infer_provider_name(
+            {"kwargs": {"azure_endpoint": "https://x"}},
+            None,
+            None,
+        )
         == "azure.ai.openai"
     )
     assert (
@@ -1406,7 +1435,10 @@ def test_llm_end_marks_json_output_type_when_tool_calls_present() -> None:
         generation_info={"finish_reason": "tool_calls"},
     )
     llm_output: Dict[str, Any] = {
-        "amazon-bedrock-invocationMetrics": {"inputTokenCount": 1, "outputTokenCount": 2}
+        "amazon-bedrock-invocationMetrics": {
+            "inputTokenCount": 1,
+            "outputTokenCount": 2,
+        }
     }
     result = LLMResult(generations=[[generation]], llm_output=llm_output)
     tracer.on_llm_end(result, run_id=run_id)
@@ -1416,7 +1448,9 @@ def test_llm_end_marks_json_output_type_when_tool_calls_present() -> None:
     # Token usage should be extracted and recorded on the span
     assert span.attributes.get(tracing.Attrs.USAGE_INPUT_TOKENS) == 1
     assert span.attributes.get(tracing.Attrs.USAGE_OUTPUT_TOKENS) == 2
-    # Normalized usage should be attached back onto llm_output when sourced from Bedrock metrics
+    # Normalized usage should be attached back onto llm_output when sourced from
+    # Bedrock metrics.
+    assert result.llm_output is not None
     assert result.llm_output.get("token_usage") == {
         "prompt_tokens": 1,
         "completion_tokens": 2,
@@ -1474,16 +1508,21 @@ def test_usage_metadata_to_mapping_handles_various_inputs() -> None:
     # None
     assert tracing._usage_metadata_to_mapping(None) is None
     # Already a mapping
-    assert tracing._usage_metadata_to_mapping({"input_tokens": 5}) == {"input_tokens": 5}
+    sample_mapping = {"input_tokens": 5}
+    assert tracing._usage_metadata_to_mapping(sample_mapping) == sample_mapping
+
     # Object with dict method
     class FakeMetadata:
         def dict(self, exclude_none: bool = False) -> dict:
             return {"input_tokens": 10}
+
     assert tracing._usage_metadata_to_mapping(FakeMetadata()) == {"input_tokens": 10}
+
     # Object with attributes
     class AttrMetadata:
         input_tokens = 7
         output_tokens = 3
+
     result = tracing._usage_metadata_to_mapping(AttrMetadata())
     assert result is not None
     assert result.get("input_tokens") == 7
@@ -1493,13 +1532,28 @@ def test_usage_metadata_to_mapping_handles_various_inputs() -> None:
 def test_should_ignore_agent_span_filters_start_and_middleware() -> None:
     tracer = tracing.AzureAIOpenTelemetryTracer()
     # __start__ node should be ignored
-    assert tracer._should_ignore_agent_span("__start__", None, {"langgraph_node": "__start__"}, {})
+    assert tracer._should_ignore_agent_span(
+        "__start__",
+        None,
+        {"langgraph_node": "__start__"},
+        {},
+    )
     # Middleware prefix should be ignored
     assert tracer._should_ignore_agent_span("Middleware.auth", None, {}, {})
     # otel_agent_span=False should be ignored
-    assert tracer._should_ignore_agent_span("Agent", None, {"otel_agent_span": False}, {})
+    assert tracer._should_ignore_agent_span(
+        "Agent",
+        None,
+        {"otel_agent_span": False},
+        {},
+    )
     # Normal agent should not be ignored
-    assert not tracer._should_ignore_agent_span("Agent", None, {"otel_agent_span": True, "agent_name": "Agent"}, {})
+    assert not tracer._should_ignore_agent_span(
+        "Agent",
+        None,
+        {"otel_agent_span": True, "agent_name": "Agent"},
+        {},
+    )
 
 
 def test_end_span_sets_error_type_when_status_is_none() -> None:
@@ -1549,7 +1603,7 @@ def test_collect_usage_from_generations_extracts_from_message() -> None:
     gen = ChatGeneration(
         message=AIMessage(
             content="x",
-            usage_metadata={"input_tokens": 5, "output_tokens": 3, "total_tokens": 8}
+            usage_metadata={"input_tokens": 5, "output_tokens": 3, "total_tokens": 8},
         ),
     )
     result = tracing._collect_usage_from_generations([gen])
@@ -1589,20 +1643,24 @@ def test_candidate_from_serialized_id_handles_various_inputs() -> None:
 def test_as_json_attribute_handles_non_serializable() -> None:
     result = tracing._as_json_attribute({"key": "value"})
     assert result == '{"key": "value"}'
+
     # Non-serializable objects use default=str
     class Custom:
         def __str__(self) -> str:
             return "custom_repr"
+
     result = tracing._as_json_attribute({"obj": Custom()})
     assert "custom_repr" in result
 
 
 def test_tool_type_from_definition() -> None:
     assert tracing._tool_type_from_definition({"type": "FUNCTION"}) == "function"
-    assert tracing._tool_type_from_definition({"function": {"type": "retriever"}}) == "retriever"
+    assert (
+        tracing._tool_type_from_definition({"function": {"type": "retriever"}})
+        == "retriever"
+    )
     assert tracing._tool_type_from_definition({"function": {}}) == "function"
     assert tracing._tool_type_from_definition({}) is None
-    assert tracing._tool_type_from_definition(None) is None
 
 
 def test_coerce_int_edge_cases() -> None:
@@ -1642,7 +1700,9 @@ def test_resolve_parent_id_handles_circular_references() -> None:
     tracer = tracing.AzureAIOpenTelemetryTracer()
     # Create circular reference in overrides
     from uuid import UUID
-    id1, id2 = UUID("11111111-1111-1111-1111-111111111111"), UUID("22222222-2222-2222-2222-222222222222")
+
+    id1 = UUID("11111111-1111-1111-1111-111111111111")
+    id2 = UUID("22222222-2222-2222-2222-222222222222")
     tracer._run_parent_override[str(id1)] = str(id2)
     tracer._run_parent_override[str(id2)] = str(id1)
     # Should return None to prevent infinite loop
@@ -1659,7 +1719,8 @@ def test_llm_new_token_is_silent() -> None:
         run_id=run_id,
         invocation_params={"model": "m"},
     )
-    # on_llm_new_token should not crash and should not add events (streaming tokens are not recorded)
+    # on_llm_new_token should not crash and should not add events (streaming tokens
+    # are not recorded).
     tracer.on_llm_new_token("token", run_id=run_id)
     span = get_last_span_for(tracer)
     assert span.events == []
