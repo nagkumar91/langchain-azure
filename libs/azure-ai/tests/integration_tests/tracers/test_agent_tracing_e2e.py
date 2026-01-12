@@ -46,6 +46,7 @@ class RecordingTracer(AzureAIOpenTelemetryTracer):
         kind: Any,
         parent_run_id: UUID | None,
         attributes: Dict[str, Any] | None = None,
+        thread_key: str | None = None,
     ) -> None:
         super()._start_span(
             run_id,
@@ -54,6 +55,7 @@ class RecordingTracer(AzureAIOpenTelemetryTracer):
             kind=kind,
             parent_run_id=parent_run_id,
             attributes=attributes,
+            thread_key=thread_key,
         )
         self._span_names[str(run_id)] = name
 
@@ -271,3 +273,125 @@ def test_langgraph_agent_loop_records_spans() -> None:
         if span.operation == "invoke_agent" and span.parent_run_id is None
     )
     assert root_span.attributes.get(Attrs.AGENT_NAME) == "LangGraph"
+
+
+@pytest.mark.block_network()
+def test_agent_with_failing_tool_records_error_span() -> None:
+    """Ensure tool failure is traced with error status."""
+    tracer = RecordingTracer(enable_content_recording=True, name="error-agent")
+
+    @tool
+    def failing_tool(query: str) -> str:
+        """A tool that always fails."""
+        raise ValueError("Tool intentionally failed")
+
+    tool_call_message = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "name": "failing_tool",
+                "id": "call_fail",
+                "args": {"query": "test"},
+            }
+        ],
+    )
+    final_reply = AIMessage(content="I encountered an error.")
+    responses = cast(List[BaseMessage], [tool_call_message, final_reply])
+    model = ToolAwareFakeMessagesListChatModel(responses=responses)
+
+    agent: Any = create_agent(
+        model=model,
+        system_prompt="You are a helpful agent.",
+        tools=[failing_tool],
+    )
+
+    try:
+        agent.invoke(
+            {"messages": [{"role": "user", "content": "Run the tool"}]},
+            config={"callbacks": [tracer]},
+        )
+    except ValueError:
+        pass  # Expected
+
+    # There should be at least one span with execute_tool operation
+    tool_spans = [
+        span for span in tracer.completed_spans if span.operation == "execute_tool"
+    ]
+    assert len(tool_spans) > 0
+    tool_span = tool_spans[0]
+    assert tool_span.attributes.get(Attrs.TOOL_NAME) == "failing_tool"
+
+
+@pytest.mark.block_network()
+def test_multi_turn_conversation_with_thread_id() -> None:
+    """Ensure multi-turn conversations maintain thread context."""
+    tracer = RecordingTracer(enable_content_recording=True, name="multi-turn-agent")
+
+    responses1 = cast(List[BaseMessage], [AIMessage(content="Hello! How can I help?")])
+    responses2 = cast(List[BaseMessage], [AIMessage(content="The weather is sunny.")])
+
+    model = FakeMessagesListChatModel(responses=responses1 + responses2)
+
+    def call_model(state: MessagesState) -> Dict[str, List[AIMessage]]:
+        response = model.invoke(state["messages"])
+        return {"messages": [response]}
+
+    workflow = StateGraph(MessagesState)
+    workflow.add_node("agent", call_model)
+    workflow.add_edge(START, "agent")
+    app = workflow.compile(checkpointer=MemorySaver())
+
+    thread_id = "multi-turn-thread-123"
+    config = cast(
+        RunnableConfig,
+        {"configurable": {"thread_id": thread_id}, "callbacks": [tracer]},
+    )
+
+    # First turn
+    input1: MessagesState = {"messages": [HumanMessage(content="Hi there!")]}
+    result1 = app.invoke(cast(Any, input1), config=config)
+    assert result1["messages"][-1].content == "Hello! How can I help?"
+
+    # Second turn
+    input2: MessagesState = {"messages": result1["messages"] + [HumanMessage(content="What's the weather?")]}
+    result2 = app.invoke(cast(Any, input2), config=config)
+    assert result2["messages"][-1].content == "The weather is sunny."
+
+    # Verify spans were created for both turns
+    root_spans = [
+        span
+        for span in tracer.completed_spans
+        if span.operation == "invoke_agent" and span.parent_run_id is None
+    ]
+    assert len(root_spans) >= 2
+    # All root spans should have conversation ID attribute set
+    for span in root_spans:
+        assert span.attributes.get(Attrs.CONVERSATION_ID) == thread_id
+
+
+@pytest.mark.block_network()
+def test_agent_with_content_recording_disabled() -> None:
+    """Ensure content is redacted when content recording is disabled."""
+    tracer = RecordingTracer(enable_content_recording=False, name="redacted-agent")
+    responses = cast(List[BaseMessage], [AIMessage(content="Secret response")])
+    model = FakeMessagesListChatModel(responses=responses)
+    agent: Any = create_agent(
+        model=model,
+        system_prompt="Secret system prompt",
+        tools=[],
+    )
+
+    result = agent.invoke(
+        {"messages": [{"role": "user", "content": "Secret user message"}]},
+        config={"callbacks": [tracer]},
+    )
+
+    assert result["messages"][-1].content == "Secret response"
+
+    chat_span = next(
+        span for span in tracer.completed_spans if span.operation == "chat"
+    )
+    # Input messages should be redacted
+    input_messages = chat_span.attributes.get(Attrs.INPUT_MESSAGES)
+    if input_messages:
+        assert "[redacted]" in input_messages

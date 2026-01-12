@@ -49,6 +49,7 @@ class RecordingTracer(AzureAIOpenTelemetryTracer):
         kind: Any,
         parent_run_id: UUID | None,
         attributes: Dict[str, Any] | None = None,
+        thread_key: str | None = None,
     ) -> None:
         super()._start_span(
             run_id,
@@ -57,6 +58,7 @@ class RecordingTracer(AzureAIOpenTelemetryTracer):
             kind=kind,
             parent_run_id=parent_run_id,
             attributes=attributes,
+            thread_key=thread_key,
         )
         self._span_names[str(run_id)] = name
 
@@ -149,7 +151,9 @@ async def test_negative_agent_tracer_records(monkeypatch: pytest.MonkeyPatch) ->
 
     assert "invoke_agent negative-agent" in relevant_spans
     llm_span = next(
-        span for span in tracer.completed_spans if span.name.startswith("chat ")
+        span
+        for span in tracer.completed_spans
+        if span.operation in {"text_completion", "chat"}
     )
     root_span = relevant_spans["invoke_agent negative-agent"]
 
