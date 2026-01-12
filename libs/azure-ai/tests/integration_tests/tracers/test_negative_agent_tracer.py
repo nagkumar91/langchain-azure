@@ -136,7 +136,7 @@ def _build_negative_agent(tracer: RecordingTracer, use_azure: bool) -> Any:
 @pytest.mark.block_network()
 @pytest.mark.vcr()
 async def test_negative_agent_tracer_records(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY", "sk-test"))
+    monkeypatch.setenv("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY") or "sk-test")
 
     tracer = RecordingTracer(enable_content_recording=True, name="negative-agent")
     graph = _build_negative_agent(tracer, use_azure=False)
