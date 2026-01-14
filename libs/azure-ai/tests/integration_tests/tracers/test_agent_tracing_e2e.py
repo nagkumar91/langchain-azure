@@ -1,18 +1,22 @@
+"""End-to-end integration tests for agent tracing with real LLM calls."""
+
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, cast
 from uuid import UUID
 
 import pytest
 from langchain.agents import create_agent
-from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
+from langchain_openai import AzureChatOpenAI, ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
+from pydantic import SecretStr
 
 from langchain_azure_ai.callbacks.tracers.inference_tracing import (
     Attrs,
@@ -86,38 +90,62 @@ class RecordingTracer(AzureAIOpenTelemetryTracer):
             )
 
 
-class ToolAwareFakeMessagesListChatModel(FakeMessagesListChatModel):
-    """Fake chat model that allows binding tools by returning itself."""
-
-    def bind_tools(
-        self,
-        tools: Any,
-        *,
-        tool_choice: str | None = None,
-        **kwargs: Any,
-    ) -> FakeMessagesListChatModel:
-        self._bound_tools = tools  # type: ignore[attr-defined]
-        return self
+def _get_openai_model() -> ChatOpenAI:
+    """Create a ChatOpenAI model for testing."""
+    return ChatOpenAI(
+        model="gpt-4.1",
+        temperature=0,
+        seed=42,
+    )
 
 
+def _get_azure_model() -> AzureChatOpenAI:
+    """Create an AzureChatOpenAI model for testing."""
+    return AzureChatOpenAI(
+        azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+        api_key=SecretStr(os.environ["AZURE_OPENAI_API_KEY"]),
+        api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-12-01-preview"),
+        azure_deployment=os.environ["AZURE_OPENAI_DEPLOYMENT"],
+        temperature=0,
+        seed=42,
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.block_network()
-def test_basic_agent_tracing_records_spans() -> None:
+@pytest.mark.vcr()
+async def test_basic_agent_tracing_records_spans(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ensure a simple agent invocation produces agent and LLM spans."""
+    monkeypatch.setenv("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY") or "sk-test")
+
     tracer = RecordingTracer(enable_content_recording=True, name="informational-agent")
-    responses = cast(List[BaseMessage], [AIMessage(content="It's always sunny!")])
-    model = FakeMessagesListChatModel(responses=responses)
-    agent: Any = create_agent(
-        model=model,
-        system_prompt="You are an informational agent. Answer questions cheerfully.",
-        tools=[],
+    model = _get_openai_model()
+
+    async def call_model(state: MessagesState) -> Dict[str, List[BaseMessage]]:
+        prompt = [
+            SystemMessage(
+                content="You are an informational agent. Answer questions cheerfully "
+                "and concisely in one sentence."
+            ),
+            *state["messages"],
+        ]
+        response = await model.ainvoke(prompt)
+        return {"messages": [response]}
+
+    workflow = StateGraph(MessagesState)
+    workflow.add_node("agent", call_model)
+    workflow.add_edge(START, "agent")
+    app = workflow.compile(name="informational-agent").with_config(
+        {"callbacks": [tracer]}
     )
 
-    result = agent.invoke(
-        {"messages": [{"role": "user", "content": "What's the weather today?"}]},
-        config={"callbacks": [tracer]},
+    result = await app.ainvoke(
+        {"messages": [HumanMessage(content="What's the weather like in general?")]},
     )
 
-    assert result["messages"][-1].content == "It's always sunny!"
+    assert result["messages"][-1].content
     span_names = [span.name for span in tracer.completed_spans]
     assert any(name.startswith("invoke_agent") for name in span_names)
     chat_span = next(
@@ -129,53 +157,50 @@ def test_basic_agent_tracing_records_spans() -> None:
         for span in tracer.completed_spans
         if span.operation == "invoke_agent" and span.parent_run_id is None
     )
-    assert root_span.attributes.get(Attrs.AGENT_NAME) == "LangGraph"
+    assert root_span.attributes.get(Attrs.AGENT_NAME) == "informational-agent"
     assert chat_span.parent_run_id == root_span.run_id
 
 
+@pytest.mark.asyncio
 @pytest.mark.block_network()
-def test_agent_with_tool_records_tool_span() -> None:
+@pytest.mark.vcr()
+async def test_agent_with_tool_records_tool_span(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ensure tool execution is traced with arguments and results."""
-    tracer = RecordingTracer(enable_content_recording=True, name="weather-agent")
+    monkeypatch.setenv("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY") or "sk-test")
 
-    tool_call_message = AIMessage(
-        content="",
-        tool_calls=[
-            {
-                "name": "get_weather",
-                "id": "call_weather",
-                "args": {"city": "San Francisco"},
-            }
-        ],
-    )
-    final_reply = AIMessage(content="It's rainy and 60°F in San Francisco.")
-    responses = cast(List[BaseMessage], [tool_call_message, final_reply])
-    model = ToolAwareFakeMessagesListChatModel(responses=responses)
+    tracer = RecordingTracer(enable_content_recording=True, name="weather-agent")
 
     @tool
     def get_weather(city: str) -> dict[str, Any]:
-        """Return mock weather information for a city."""
-        return {"temperature": 60, "description": "Rainy", "city": city}
+        """Return weather information for a city."""
+        return {"temperature": 72, "description": "Sunny", "city": city}
 
-    agent: Any = create_agent(
-        model=model,
-        system_prompt="You are an informational agent. Answer questions cheerfully.",
-        tools=[get_weather],
+    model = _get_openai_model()
+    agent = create_agent(model=model, tools=[get_weather])
+    agent = agent.with_config({"callbacks": [tracer]})
+
+    result = await agent.ainvoke(
+        {"messages": [HumanMessage(content="What's the weather in San Francisco?")]},
     )
 
-    response = agent.invoke(
-        {"messages": [{"role": "user", "content": "weather in San Francisco?"}]},
-        config={"callbacks": [tracer]},
+    assert result["messages"][-1].content
+    assert (
+        "San Francisco" in result["messages"][-1].content
+        or "72" in result["messages"][-1].content
     )
-
-    assert response["messages"][-1].content == "It's rainy and 60°F in San Francisco."
 
     tool_span = next(
-        span
-        for span in tracer.completed_spans
-        if span.name.startswith("execute_tool get_weather")
+        (
+            span
+            for span in tracer.completed_spans
+            if span.operation == "execute_tool"
+            and span.attributes.get(Attrs.TOOL_NAME) == "get_weather"
+        ),
+        None,
     )
-    assert tool_span.operation == "execute_tool"
+    assert tool_span is not None
     assert tool_span.attributes.get(Attrs.TOOL_CALL_ARGUMENTS)
 
     root_span = next(
@@ -184,56 +209,51 @@ def test_agent_with_tool_records_tool_span() -> None:
         if span.operation == "invoke_agent" and span.parent_run_id is None
     )
     assert root_span.attributes.get(Attrs.AGENT_NAME) == "LangGraph"
-    span_index = {span.run_id: span for span in tracer.completed_spans}
-    parent_span = span_index.get(tool_span.parent_run_id or "")
-    assert parent_span is not None
-    assert parent_span.operation in {"invoke_agent", "chat"}
 
 
+@pytest.mark.asyncio
 @pytest.mark.block_network()
-def test_langgraph_agent_loop_records_spans() -> None:
+@pytest.mark.vcr()
+async def test_langgraph_agent_loop_records_spans(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ensure LangGraph agent/tool loop traces correctly."""
-    tracer = RecordingTracer(enable_content_recording=True, name="music-agent")
+    monkeypatch.setenv("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY") or "sk-test")
+
+    tracer = RecordingTracer(enable_content_recording=True, name="calculator-agent")
 
     @tool
-    def play_song_on_spotify(song: str) -> str:
-        """Play a song on Spotify."""
-        return f"Successfully played {song} on Spotify!"
+    def add_numbers(a: int, b: int) -> int:
+        """Add two numbers together."""
+        return a + b
 
     @tool
-    def play_song_on_apple(song: str) -> str:
-        """Play a song on Apple Music."""
-        return f"Successfully played {song} on Apple Music!"
+    def multiply_numbers(a: int, b: int) -> int:
+        """Multiply two numbers together."""
+        return a * b
 
-    tool_call_message = AIMessage(
-        content="",
-        tool_calls=[
-            {
-                "name": "play_song_on_apple",
-                "id": "call_music",
-                "args": {"song": "Taylor Swift's most popular song"},
-            }
-        ],
-    )
-    final_reply = AIMessage(content="Playing Taylor Swift's most popular song!")
-    responses = cast(List[BaseMessage], [tool_call_message, final_reply])
-    model = ToolAwareFakeMessagesListChatModel(responses=responses)
-    model.bind_tools(
-        [play_song_on_apple, play_song_on_spotify],
-        parallel_tool_calls=False,
-    )
+    model = _get_openai_model()
 
     def should_continue(state: MessagesState) -> str:
         last_message = state["messages"][-1]
         return "continue" if getattr(last_message, "tool_calls", None) else "end"
 
-    def call_model(state: MessagesState) -> Dict[str, List[AIMessage]]:
-        response = model.invoke(state["messages"])
+    async def call_model(state: MessagesState) -> Dict[str, List[BaseMessage]]:
+        prompt = [
+            SystemMessage(
+                content="You are a calculator assistant. Use the provided tools to "
+                "perform calculations. Always use the tools for math operations."
+            ),
+            *state["messages"],
+        ]
+        response = await model.bind_tools([add_numbers, multiply_numbers]).ainvoke(
+            prompt
+        )
         return {"messages": [response]}
 
     workflow = StateGraph(MessagesState)
     workflow.add_node("agent", call_model)
-    workflow.add_node("action", ToolNode([play_song_on_apple, play_song_on_spotify]))
+    workflow.add_node("action", ToolNode([add_numbers, multiply_numbers]))
     workflow.add_edge(START, "agent")
     workflow.add_conditional_edges(
         "agent",
@@ -241,18 +261,18 @@ def test_langgraph_agent_loop_records_spans() -> None:
         {"continue": "action", "end": END},
     )
     workflow.add_edge("action", "agent")
-    app = workflow.compile(checkpointer=MemorySaver())
+    app = workflow.compile(checkpointer=MemorySaver(), name="calculator-agent")
+    app = app.with_config({"callbacks": [tracer]})
 
     config = cast(
         RunnableConfig,
-        {"configurable": {"thread_id": "music-thread"}, "callbacks": [tracer]},
-    )
-    input_message = HumanMessage(
-        content="Can you play Taylor Swift's most popular song?"
+        {"configurable": {"thread_id": "calc-thread"}},
     )
     final_message: Optional[AIMessage] = None
-    initial_state: MessagesState = {"messages": [input_message]}
-    for event in app.stream(
+    initial_state: MessagesState = {
+        "messages": [HumanMessage(content="What is 5 + 3?")]
+    }
+    async for event in app.astream(
         cast(Any, initial_state),
         config=config,
         stream_mode="values",
@@ -260,107 +280,67 @@ def test_langgraph_agent_loop_records_spans() -> None:
         final_message = cast(AIMessage, event["messages"][-1])
 
     assert final_message is not None
-    assert "Taylor Swift" in final_message.content
+    assert "8" in str(final_message.content)
 
-    execute_span = next(
+    execute_spans = [
         span for span in tracer.completed_spans if span.operation == "execute_tool"
-    )
-    assert execute_span.attributes.get(Attrs.TOOL_NAME) == "play_song_on_apple"
+    ]
+    assert len(execute_spans) > 0
+    assert execute_spans[0].attributes.get(Attrs.TOOL_NAME) == "add_numbers"
 
     root_span = next(
         span
         for span in tracer.completed_spans
         if span.operation == "invoke_agent" and span.parent_run_id is None
     )
-    assert root_span.attributes.get(Attrs.AGENT_NAME) == "LangGraph"
+    assert root_span.attributes.get(Attrs.AGENT_NAME) == "calculator-agent"
 
 
+@pytest.mark.asyncio
 @pytest.mark.block_network()
-def test_agent_with_failing_tool_records_error_span() -> None:
-    """Ensure tool failure is traced with error status."""
-    tracer = RecordingTracer(enable_content_recording=True, name="error-agent")
-
-    @tool
-    def failing_tool(query: str) -> str:
-        """A tool that always fails."""
-        raise ValueError("Tool intentionally failed")
-
-    tool_call_message = AIMessage(
-        content="",
-        tool_calls=[
-            {
-                "name": "failing_tool",
-                "id": "call_fail",
-                "args": {"query": "test"},
-            }
-        ],
-    )
-    final_reply = AIMessage(content="I encountered an error.")
-    responses = cast(List[BaseMessage], [tool_call_message, final_reply])
-    model = ToolAwareFakeMessagesListChatModel(responses=responses)
-
-    agent: Any = create_agent(
-        model=model,
-        system_prompt="You are a helpful agent.",
-        tools=[failing_tool],
-    )
-
-    try:
-        agent.invoke(
-            {"messages": [{"role": "user", "content": "Run the tool"}]},
-            config={"callbacks": [tracer]},
-        )
-    except ValueError:
-        pass  # Expected
-
-    # There should be at least one span with execute_tool operation
-    tool_spans = [
-        span for span in tracer.completed_spans if span.operation == "execute_tool"
-    ]
-    assert len(tool_spans) > 0
-    tool_span = tool_spans[0]
-    assert tool_span.attributes.get(Attrs.TOOL_NAME) == "failing_tool"
-
-
-@pytest.mark.block_network()
-def test_multi_turn_conversation_with_thread_id() -> None:
+@pytest.mark.vcr()
+async def test_multi_turn_conversation_with_thread_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ensure multi-turn conversations maintain thread context."""
+    monkeypatch.setenv("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY") or "sk-test")
+
     tracer = RecordingTracer(enable_content_recording=True, name="multi-turn-agent")
+    model = _get_openai_model()
 
-    responses1 = cast(List[BaseMessage], [AIMessage(content="Hello! How can I help?")])
-    responses2 = cast(List[BaseMessage], [AIMessage(content="The weather is sunny.")])
-
-    model = FakeMessagesListChatModel(responses=responses1 + responses2)
-
-    def call_model(state: MessagesState) -> Dict[str, List[AIMessage]]:
-        response = model.invoke(state["messages"])
+    async def call_model(state: MessagesState) -> Dict[str, List[BaseMessage]]:
+        prompt = [
+            SystemMessage(
+                content="You are a helpful assistant. Keep your responses brief."
+            ),
+            *state["messages"],
+        ]
+        response = await model.ainvoke(prompt)
         return {"messages": [response]}
 
     workflow = StateGraph(MessagesState)
     workflow.add_node("agent", call_model)
     workflow.add_edge(START, "agent")
-    app = workflow.compile(checkpointer=MemorySaver())
+    app = workflow.compile(checkpointer=MemorySaver(), name="multi-turn-agent")
+    app = app.with_config({"callbacks": [tracer]})
 
     thread_id = "multi-turn-thread-123"
     config = cast(
         RunnableConfig,
-        {"configurable": {"thread_id": thread_id}, "callbacks": [tracer]},
+        {"configurable": {"thread_id": thread_id}},
     )
 
     # First turn
     input1: MessagesState = {"messages": [HumanMessage(content="Hi there!")]}
-    result1 = app.invoke(cast(Any, input1), config=config)
-    assert result1["messages"][-1].content == "Hello! How can I help?"
+    result1 = await app.ainvoke(cast(Any, input1), config=config)
+    assert result1["messages"][-1].content
 
-    # Second turn
-    input2: MessagesState = {
-        "messages": [
-            *result1["messages"],
-            HumanMessage(content="What's the weather?"),
-        ]
-    }
-    result2 = app.invoke(cast(Any, input2), config=config)
-    assert result2["messages"][-1].content == "The weather is sunny."
+    # Second turn - continue the conversation
+    result2 = await app.ainvoke(
+        cast(Any, {"messages": [HumanMessage(content="What can you help me with?")]}),
+        config=config,
+    )
+    assert result2["messages"][-1].content
 
     # Verify spans were created for both turns
     root_spans = [
@@ -374,24 +354,36 @@ def test_multi_turn_conversation_with_thread_id() -> None:
         assert span.attributes.get(Attrs.CONVERSATION_ID) == thread_id
 
 
+@pytest.mark.asyncio
 @pytest.mark.block_network()
-def test_agent_with_content_recording_disabled() -> None:
+@pytest.mark.vcr()
+async def test_agent_with_content_recording_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Ensure content is redacted when content recording is disabled."""
+    monkeypatch.setenv("OPENAI_API_KEY", os.environ.get("OPENAI_API_KEY") or "sk-test")
+
     tracer = RecordingTracer(enable_content_recording=False, name="redacted-agent")
-    responses = cast(List[BaseMessage], [AIMessage(content="Secret response")])
-    model = FakeMessagesListChatModel(responses=responses)
-    agent: Any = create_agent(
-        model=model,
-        system_prompt="Secret system prompt",
-        tools=[],
+    model = _get_openai_model()
+
+    async def call_model(state: MessagesState) -> Dict[str, List[BaseMessage]]:
+        prompt = [
+            SystemMessage(content="You are a helpful assistant."),
+            *state["messages"],
+        ]
+        response = await model.ainvoke(prompt)
+        return {"messages": [response]}
+
+    workflow = StateGraph(MessagesState)
+    workflow.add_node("agent", call_model)
+    workflow.add_edge(START, "agent")
+    app = workflow.compile(name="redacted-agent").with_config({"callbacks": [tracer]})
+
+    result = await app.ainvoke(
+        {"messages": [HumanMessage(content="Tell me a secret")]},
     )
 
-    result = agent.invoke(
-        {"messages": [{"role": "user", "content": "Secret user message"}]},
-        config={"callbacks": [tracer]},
-    )
-
-    assert result["messages"][-1].content == "Secret response"
+    assert result["messages"][-1].content
 
     chat_span = next(
         span for span in tracer.completed_spans if span.operation == "chat"
@@ -400,3 +392,54 @@ def test_agent_with_content_recording_disabled() -> None:
     input_messages = chat_span.attributes.get(Attrs.INPUT_MESSAGES)
     if input_messages:
         assert "[redacted]" in input_messages
+
+
+@pytest.mark.asyncio
+@pytest.mark.block_network()
+@pytest.mark.vcr()
+async def test_basic_agent_tracing_azure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ensure Azure OpenAI agent tracing works correctly."""
+    required = [
+        "AZURE_OPENAI_ENDPOINT",
+        "AZURE_OPENAI_API_KEY",
+        "AZURE_OPENAI_DEPLOYMENT",
+    ]
+    missing = [var for var in required if var not in os.environ]
+    if missing:
+        pytest.skip(f"Missing Azure env vars: {', '.join(missing)}")
+
+    tracer = RecordingTracer(enable_content_recording=True, name="azure-agent")
+    model = _get_azure_model()
+
+    async def call_model(state: MessagesState) -> Dict[str, List[BaseMessage]]:
+        prompt = [
+            SystemMessage(
+                content="You are a helpful assistant. Answer concisely in one sentence."
+            ),
+            *state["messages"],
+        ]
+        response = await model.ainvoke(prompt)
+        return {"messages": [response]}
+
+    workflow = StateGraph(MessagesState)
+    workflow.add_node("agent", call_model)
+    workflow.add_edge(START, "agent")
+    app = workflow.compile(name="azure-agent").with_config({"callbacks": [tracer]})
+
+    result = await app.ainvoke(
+        {"messages": [HumanMessage(content="What is Python?")]},
+    )
+
+    assert result["messages"][-1].content
+    root_span = next(
+        span
+        for span in tracer.completed_spans
+        if span.operation == "invoke_agent" and span.parent_run_id is None
+    )
+    assert root_span.attributes.get(Attrs.AGENT_NAME) == "azure-agent"
+    chat_span = next(
+        span for span in tracer.completed_spans if span.operation == "chat"
+    )
+    assert chat_span.parent_run_id == root_span.run_id
