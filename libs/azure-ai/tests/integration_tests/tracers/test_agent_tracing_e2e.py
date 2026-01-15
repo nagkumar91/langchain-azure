@@ -9,7 +9,13 @@ from uuid import UUID
 
 import pytest
 from langchain.agents import create_agent
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    AnyMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+)
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 from langchain_openai import AzureChatOpenAI, ChatOpenAI
@@ -90,6 +96,10 @@ class RecordingTracer(AzureAIOpenTelemetryTracer):
             )
 
 
+def _messages_state(*messages: AnyMessage) -> MessagesState:
+    return {"messages": list(messages)}
+
+
 def _get_openai_model() -> ChatOpenAI:
     """Create a ChatOpenAI model for testing."""
     return ChatOpenAI(
@@ -141,9 +151,10 @@ async def test_basic_agent_tracing_records_spans(
         {"callbacks": [tracer]}
     )
 
-    result = await app.ainvoke(
-        {"messages": [HumanMessage(content="What's the weather like in general?")]},
+    input_state = _messages_state(
+        HumanMessage(content="What's the weather like in general?"),
     )
+    result = await app.ainvoke(cast(Any, input_state))
 
     assert result["messages"][-1].content
     span_names = [span.name for span in tracer.completed_spans]
@@ -178,7 +189,7 @@ async def test_agent_with_tool_records_tool_span(
         return {"temperature": 72, "description": "Sunny", "city": city}
 
     model = _get_openai_model()
-    agent = create_agent(model=model, tools=[get_weather])
+    agent: Any = create_agent(model=model, tools=[get_weather])
     agent = agent.with_config({"callbacks": [tracer]})
 
     result = await agent.ainvoke(
@@ -379,9 +390,8 @@ async def test_agent_with_content_recording_disabled(
     workflow.add_edge(START, "agent")
     app = workflow.compile(name="redacted-agent").with_config({"callbacks": [tracer]})
 
-    result = await app.ainvoke(
-        {"messages": [HumanMessage(content="Tell me a secret")]},
-    )
+    input_state = _messages_state(HumanMessage(content="Tell me a secret"))
+    result = await app.ainvoke(cast(Any, input_state))
 
     assert result["messages"][-1].content
 
@@ -428,9 +438,8 @@ async def test_basic_agent_tracing_azure(
     workflow.add_edge(START, "agent")
     app = workflow.compile(name="azure-agent").with_config({"callbacks": [tracer]})
 
-    result = await app.ainvoke(
-        {"messages": [HumanMessage(content="What is Python?")]},
-    )
+    input_state = _messages_state(HumanMessage(content="What is Python?"))
+    result = await app.ainvoke(cast(Any, input_state))
 
     assert result["messages"][-1].content
     root_span = next(
