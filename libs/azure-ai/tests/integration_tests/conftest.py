@@ -18,10 +18,20 @@ FILTER_HEADERS = [
 ]
 
 
+def _remove_header_case_insensitive(
+    headers: MutableMapping[str, Any],
+    header_name: str,
+) -> None:
+    """Remove headers that match header_name (case-insensitive)."""
+    match_name = header_name.lower()
+    keys_to_remove = [key for key in headers if key.lower() == match_name]
+    for key in keys_to_remove:
+        del headers[key]
+
+
 def _sanitize_request(request: Any) -> Any:
     headers = cast(MutableMapping[str, Any], getattr(request, "headers", {}))
-    for key in [header for header in headers if header.lower() == "cookie"]:
-        headers.pop(key, None)
+    _remove_header_case_insensitive(headers, "cookie")
     for header, replacement in FILTER_HEADERS:
         if header in headers:
             headers[header] = replacement
@@ -30,10 +40,10 @@ def _sanitize_request(request: Any) -> Any:
 
 def _sanitize_response(response: Dict[str, Any]) -> Dict[str, Any]:
     headers = cast(MutableMapping[str, Any], response.get("headers", {}))
-    for key in [header for header in headers if header.lower() == "set-cookie"]:
-        headers.pop(key, None)
-    for header in headers:
-        headers[header] = ["REDACTED"]
+    for header in list(headers):
+        if header.lower() != "set-cookie":
+            headers[header] = ["REDACTED"]
+    _remove_header_case_insensitive(headers, "set-cookie")
     return response
 
 
