@@ -20,6 +20,8 @@ FILTER_HEADERS = [
 
 def _sanitize_request(request: Any) -> Any:
     headers = cast(MutableMapping[str, Any], getattr(request, "headers", {}))
+    for key in [header for header in headers if header.lower() == "cookie"]:
+        headers.pop(key, None)
     for header, replacement in FILTER_HEADERS:
         if header in headers:
             headers[header] = replacement
@@ -28,6 +30,8 @@ def _sanitize_request(request: Any) -> Any:
 
 def _sanitize_response(response: Dict[str, Any]) -> Dict[str, Any]:
     headers = cast(MutableMapping[str, Any], response.get("headers", {}))
+    for key in [header for header in headers if header.lower() == "set-cookie"]:
+        headers.pop(key, None)
     for header in headers:
         headers[header] = ["REDACTED"]
     return response
