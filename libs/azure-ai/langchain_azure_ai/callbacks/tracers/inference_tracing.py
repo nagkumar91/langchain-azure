@@ -1113,13 +1113,9 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
     ) -> None:
         """Initialize tracer state and configure Azure Monitor if needed.
 
-        Args:
-            auto_configure_azure_monitor: When ``True`` (default), the tracer
-                calls ``configure_azure_monitor()`` automatically if a
-                *connection_string* is available **and** no real
-                ``TracerProvider`` has been set yet.  Set to ``False`` when
-                your application already configures Azure Monitor (or any
-                other ``TracerProvider``) to avoid duplicate telemetry export.
+        Set *auto_configure_azure_monitor* to ``False`` when your application
+        already configures Azure Monitor (or any other ``TracerProvider``) to
+        avoid duplicate telemetry export.
         """
         super().__init__()
         self._name = name
