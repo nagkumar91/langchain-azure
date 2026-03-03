@@ -1109,30 +1109,41 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         trace_all_langgraph_nodes: bool = False,
         ignore_start_node: bool = True,
         compat_create_agent_filtering: bool = True,
+        auto_configure_azure_monitor: bool = True,
     ) -> None:
-        """Initialize tracer state and configure Azure Monitor if needed."""
+        """Initialize tracer state and configure Azure Monitor if needed.
+
+        Args:
+            auto_configure_azure_monitor: When ``True`` (default), the tracer
+                calls ``configure_azure_monitor()`` automatically if a
+                *connection_string* is available **and** no real
+                ``TracerProvider`` has been set yet.  Set to ``False`` when
+                your application already configures Azure Monitor (or any
+                other ``TracerProvider``) to avoid duplicate telemetry export.
+        """
         super().__init__()
         self._name = name
         self._default_agent_id = agent_id
         self._default_provider_name = provider_name
         self._content_recording = enable_content_recording
-        self._tracer = otel_trace.get_tracer(name, schema_url=self._schema_url)
         self._message_keys = tuple(message_keys)
         self._message_paths = tuple(message_paths)
         self._trace_all_langgraph_nodes = trace_all_langgraph_nodes
         self._ignore_start_node = ignore_start_node
         self._compat_create_agent_filtering = compat_create_agent_filtering
 
-        if connection_string is None:
-            connection_string = _resolve_connection_from_project(
-                project_endpoint, credential
-            )
-        if connection_string is None:
-            connection_string = os.getenv("APPLICATION_INSIGHTS_CONNECTION_STRING")
+        if auto_configure_azure_monitor:
+            if connection_string is None:
+                connection_string = _resolve_connection_from_project(
+                    project_endpoint, credential
+                )
+            if connection_string is None:
+                connection_string = os.getenv("APPLICATION_INSIGHTS_CONNECTION_STRING")
 
-        if connection_string:
-            self._configure_azure_monitor(connection_string)
+            if connection_string:
+                self._configure_azure_monitor(connection_string)
 
+        self._tracer = otel_trace.get_tracer(name, schema_url=self._schema_url)
         self._spans: Dict[str, _SpanRecord] = {}
         self._lock = Lock()
         self._ignored_runs: set[str] = set()
@@ -2469,5 +2480,35 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         with cls._configure_lock:
             if cls._azure_monitor_configured:
                 return
-            configure_azure_monitor(connection_string=connection_string)
+
+            # If a real TracerProvider is already set (e.g. by the user or
+            # by an auto-instrumentation agent), calling
+            # configure_azure_monitor() would create an orphaned provider
+            # whose side-effects (instrumentors, live-metrics callbacks)
+            # can cause duplicate span exports.  Skip in that case.
+            current_provider = otel_trace.get_tracer_provider()
+            if not isinstance(
+                current_provider, otel_trace.ProxyTracerProvider
+            ):
+                LOGGER.info(
+                    "A TracerProvider is already configured (%s). "
+                    "Skipping configure_azure_monitor() to avoid duplicate "
+                    "telemetry export.  If this is unintentional, create "
+                    "AzureAIOpenTelemetryTracer *before* setting up your "
+                    "own TracerProvider.",
+                    type(current_provider).__name__,
+                )
+                cls._azure_monitor_configured = True
+                return
+
+            # Disable HTTP auto-instrumentors that would create redundant
+            # spans alongside the tracer's own GenAI spans.
+            configure_azure_monitor(
+                connection_string=connection_string,
+                instrumentation_options={
+                    "requests": {"enabled": False},
+                    "urllib": {"enabled": False},
+                    "urllib3": {"enabled": False},
+                },
+            )
             cls._azure_monitor_configured = True
