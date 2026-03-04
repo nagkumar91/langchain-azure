@@ -2459,9 +2459,17 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         record.span.end()
         # Reset inherited agent context if this span set it, preventing
         # leakage to subsequent unrelated root agents in the same task.
+        # The reset may fail with ValueError when on_chain_start and
+        # on_chain_end execute in different threads (common in LangGraph
+        # thread-pool dispatch) because ContextVar tokens are bound to
+        # the context that created them.  In that case we silently skip
+        # the reset — the next _start_span .set() will overwrite anyway.
         ctx_token = record.stash.get("_inherited_ctx_token")
         if ctx_token is not None:
-            _inherited_agent_context.reset(ctx_token)
+            try:
+                _inherited_agent_context.reset(ctx_token)
+            except ValueError:
+                pass
         self._run_parent_override.pop(str(run_id), None)
 
     @classmethod
