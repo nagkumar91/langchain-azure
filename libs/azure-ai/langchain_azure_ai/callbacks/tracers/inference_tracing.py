@@ -1122,9 +1122,10 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             actual_params = set(signature(_prepare_messages_fn).parameters.keys())
             if not expected_params.issubset(actual_params):
                 missing = expected_params - actual_params
+                missing_str = ", ".join(sorted(missing))
                 raise TypeError(
                     f"_prepare_messages_fn is missing required parameters: "
-                    f"{missing}. Expected signature: "
+                    f"{missing_str}. Expected signature: "
                     f"(raw_messages, *, record_content, include_roles=None) "
                     f"-> tuple[Optional[str], Optional[str]]"
                 )
@@ -2480,13 +2481,18 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         # on_chain_end execute in different threads (common in LangGraph
         # thread-pool dispatch) because ContextVar tokens are bound to
         # the context that created them.  In that case we silently skip
-        # the reset — the next _start_span .set() will overwrite anyway.
+        # the reset — the next _inherited_agent_context.set() inside
+        # _start_span will overwrite anyway.
         ctx_token = record.stash.get("_inherited_ctx_token")
         if ctx_token is not None:
             try:
                 _inherited_agent_context.reset(ctx_token)
             except ValueError:
-                pass
+                LOGGER.debug(
+                    "Skipping ContextVar reset for inherited agent "
+                    "context in different execution context: %s",
+                    run_id,
+                )
         self._run_parent_override.pop(str(run_id), None)
 
     @classmethod
