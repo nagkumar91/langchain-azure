@@ -30,9 +30,11 @@ import os
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass, field, is_dataclass
+from inspect import signature
 from threading import Lock
 from typing import (
     Any,
+    Callable,
     Dict,
     Iterable,
     Iterator,
@@ -1109,9 +1111,22 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         trace_all_langgraph_nodes: bool = False,
         ignore_start_node: bool = True,
         compat_create_agent_filtering: bool = True,
+        _prepare_messages_fn: Optional[Callable[..., tuple[Optional[str], Optional[str]]]] = None,
     ) -> None:
         """Initialize tracer state and configure Azure Monitor if needed."""
         super().__init__()
+        if _prepare_messages_fn is not None:
+            expected_params = {"raw_messages", "record_content", "include_roles"}
+            actual_params = set(signature(_prepare_messages_fn).parameters.keys())
+            if not expected_params.issubset(actual_params):
+                missing = expected_params - actual_params
+                raise TypeError(
+                    f"_prepare_messages_fn is missing required parameters: "
+                    f"{missing}. Expected signature: "
+                    f"(raw_messages, *, record_content, include_roles=None) "
+                    f"-> tuple[Optional[str], Optional[str]]"
+                )
+        self._prepare_messages_fn = _prepare_messages_fn or _prepare_messages
         self._name = name
         self._default_agent_id = agent_id
         self._default_provider_name = provider_name
@@ -1562,7 +1577,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         messages_payload, _ = _extract_messages_payload(
             inputs, message_keys=keys, message_paths=paths
         )
-        formatted_messages, system_instr = _prepare_messages(
+        formatted_messages, system_instr = self._prepare_messages_fn(
             messages_payload,
             record_content=self._content_recording,
             include_roles={"user", "assistant", "tool"},
@@ -1695,7 +1710,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             messages_payload, _ = _extract_messages_payload(
                 outputs_payload, message_keys=keys, message_paths=paths
             )
-            formatted_messages, _ = _prepare_messages(
+            formatted_messages, _ = self._prepare_messages_fn(
                 messages_payload,
                 record_content=self._content_recording,
                 include_roles={"assistant"},
@@ -2216,7 +2231,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                 invocation_params["response_format"]
             )
 
-        formatted_input, system_instr = _prepare_messages(
+        formatted_input, system_instr = self._prepare_messages_fn(
             inputs,
             record_content=self._content_recording,
             include_roles={"user", "assistant", "tool"},
