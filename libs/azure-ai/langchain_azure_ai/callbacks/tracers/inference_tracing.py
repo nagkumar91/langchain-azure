@@ -1111,7 +1111,9 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         trace_all_langgraph_nodes: bool = False,
         ignore_start_node: bool = True,
         compat_create_agent_filtering: bool = True,
-        _prepare_messages_fn: Optional[Callable[..., tuple[Optional[str], Optional[str]]]] = None,
+        _prepare_messages_fn: Optional[
+            Callable[..., tuple[Optional[str], Optional[str]]]
+        ] = None,
     ) -> None:
         """Initialize tracer state and configure Azure Monitor if needed."""
         super().__init__()
