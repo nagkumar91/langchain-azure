@@ -12,7 +12,7 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
-from langchain_azure_ai.chat_message_histories import AzureAIMemoryChatMessageHistory
+from langchain_azure_ai.chat_history import AzureAIMemoryChatMessageHistory
 
 try:
     import azure.ai.projects  # noqa: F401
@@ -29,7 +29,7 @@ class TestRoleMapping:
     def test_human_message_mapping(self) -> None:
         """Test that human messages map to user message item param."""
         mock_client = Mock()
-        mock_client.memory_stores.begin_update_memories = Mock()
+        mock_client.beta.memory_stores.begin_update_memories = Mock()
 
         with patch("azure.ai.projects.AIProjectClient", return_value=mock_client):
             history = AzureAIMemoryChatMessageHistory(
@@ -51,7 +51,7 @@ class TestRoleMapping:
     def test_ai_message_mapping(self) -> None:
         """Test that AI messages map to assistant message item param."""
         mock_client = Mock()
-        mock_client.memory_stores.begin_update_memories = Mock()
+        mock_client.beta.memory_stores.begin_update_memories = Mock()
 
         with patch("azure.ai.projects.AIProjectClient", return_value=mock_client):
             history = AzureAIMemoryChatMessageHistory(
@@ -73,7 +73,7 @@ class TestRoleMapping:
     def test_system_message_mapping(self) -> None:
         """Test that system messages map to system message item param."""
         mock_client = Mock()
-        mock_client.memory_stores.begin_update_memories = Mock()
+        mock_client.beta.memory_stores.begin_update_memories = Mock()
 
         with patch("azure.ai.projects.AIProjectClient", return_value=mock_client):
             history = AzureAIMemoryChatMessageHistory(
@@ -95,7 +95,7 @@ class TestRoleMapping:
     def test_tool_message_mapping(self) -> None:
         """Test that tool messages map to assistant message item param."""
         mock_client = Mock()
-        mock_client.memory_stores.begin_update_memories = Mock()
+        mock_client.beta.memory_stores.begin_update_memories = Mock()
 
         with patch("azure.ai.projects.AIProjectClient", return_value=mock_client):
             history = AzureAIMemoryChatMessageHistory(
@@ -118,7 +118,7 @@ class TestRoleMapping:
     def test_ai_message_chunk_mapping(self) -> None:
         """Test AIMessageChunk maps to assistant message item param."""
         mock_client = Mock()
-        mock_client.memory_stores.begin_update_memories = Mock()
+        mock_client.beta.memory_stores.begin_update_memories = Mock()
 
         with patch("azure.ai.projects.AIProjectClient", return_value=mock_client):
             history = AzureAIMemoryChatMessageHistory(
@@ -145,7 +145,7 @@ class TestChatMessageHistory:
     def test_add_message_updates_base_history(self) -> None:
         """Test that adding a message updates the underlying base history."""
         mock_client = Mock()
-        mock_client.memory_stores.begin_update_memories = Mock(return_value=Mock())
+        mock_client.beta.memory_stores.begin_update_memories = Mock(return_value=Mock())
 
         with patch("azure.ai.projects.AIProjectClient", return_value=mock_client):
             history = AzureAIMemoryChatMessageHistory(
@@ -167,7 +167,9 @@ class TestChatMessageHistory:
         """Test that adding a message triggers Foundry update."""
         mock_client = Mock()
         mock_poller = Mock()
-        mock_client.memory_stores.begin_update_memories = Mock(return_value=mock_poller)
+        mock_client.beta.memory_stores.begin_update_memories = Mock(
+            return_value=mock_poller
+        )
 
         with patch("azure.ai.projects.AIProjectClient", return_value=mock_client):
             history = AzureAIMemoryChatMessageHistory(
@@ -182,8 +184,8 @@ class TestChatMessageHistory:
         history.add_message(msg)
 
         # Verify begin_update_memories was called
-        mock_client.memory_stores.begin_update_memories.assert_called_once()
-        call_kwargs = mock_client.memory_stores.begin_update_memories.call_args[1]
+        mock_client.beta.memory_stores.begin_update_memories.assert_called_once()
+        call_kwargs = mock_client.beta.memory_stores.begin_update_memories.call_args[1]
         assert call_kwargs["name"] == "test_store"
         assert call_kwargs["scope"] == "user:test"
         assert len(call_kwargs["items"]) == 1
@@ -191,7 +193,7 @@ class TestChatMessageHistory:
     def test_add_message_swallows_exceptions(self) -> None:
         """Test that exceptions during memory update don't break the chat flow."""
         mock_client = Mock()
-        mock_client.memory_stores.begin_update_memories = Mock(
+        mock_client.beta.memory_stores.begin_update_memories = Mock(
             side_effect=Exception("Network error")
         )
 
@@ -215,10 +217,10 @@ class TestChatMessageHistory:
     def test_clear_only_clears_base_history(self) -> None:
         """Test that clear() only affects the base history, not Foundry memories."""
         mock_client = Mock()
-        mock_client.memory_stores.begin_update_memories = Mock(return_value=Mock())
+        mock_client.beta.memory_stores.begin_update_memories = Mock(return_value=Mock())
         # Ensure these methods are NOT called
-        mock_client.memory_stores.delete = Mock()
-        mock_client.memory_stores.delete_scope = Mock()
+        mock_client.beta.memory_stores.delete = Mock()
+        mock_client.beta.memory_stores.delete_scope = Mock()
 
         with patch("azure.ai.projects.AIProjectClient", return_value=mock_client):
             history = AzureAIMemoryChatMessageHistory(
@@ -237,8 +239,8 @@ class TestChatMessageHistory:
         # Base history should be cleared
         assert len(history.messages) == 0
         # Foundry delete methods should NOT be called
-        mock_client.memory_stores.delete.assert_not_called()
-        mock_client.memory_stores.delete_scope.assert_not_called()
+        mock_client.beta.memory_stores.delete.assert_not_called()
+        mock_client.beta.memory_stores.delete_scope.assert_not_called()
 
     def test_properties(self) -> None:
         """Test that properties return correct values."""
@@ -260,7 +262,7 @@ class TestChatMessageHistory:
     def test_custom_role_mapper(self) -> None:
         """Test that custom role mapper is used when provided."""
         mock_client = Mock()
-        mock_client.memory_stores.begin_update_memories = Mock(return_value=Mock())
+        mock_client.beta.memory_stores.begin_update_memories = Mock(return_value=Mock())
 
         custom_item = Mock()
         custom_mapper = Mock(return_value=custom_item)
@@ -284,7 +286,7 @@ class TestChatMessageHistory:
     def test_add_messages_multiple(self) -> None:
         """Test adding multiple messages at once."""
         mock_client = Mock()
-        mock_client.memory_stores.begin_update_memories = Mock(return_value=Mock())
+        mock_client.beta.memory_stores.begin_update_memories = Mock(return_value=Mock())
 
         with patch("azure.ai.projects.AIProjectClient", return_value=mock_client):
             history = AzureAIMemoryChatMessageHistory(
@@ -306,4 +308,4 @@ class TestChatMessageHistory:
         # All messages should be in base history
         assert len(history.messages) == 3
         # begin_update_memories should be called for each message
-        assert mock_client.memory_stores.begin_update_memories.call_count == 3
+        assert mock_client.beta.memory_stores.begin_update_memories.call_count == 3
