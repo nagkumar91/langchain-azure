@@ -53,6 +53,20 @@ def create_eval_optimize_subgraph(
     from langgraph.graph import END, START, StateGraph
 
     builder: Any = StateGraph(state_schema)
+    iteration_counter = {"count": 0}
+
+    def should_refine_with_guard(state: Any) -> str:
+        route = should_refine_fn(state)
+        if route == accepted_route:
+            iteration_counter["count"] = 0
+            return accepted_route
+
+        iteration_counter["count"] += 1
+        if iteration_counter["count"] >= max_iterations:
+            iteration_counter["count"] = 0
+            return accepted_route
+
+        return route
 
     builder.add_node("evaluate", cast(Any, evaluate_fn))
     builder.add_node("refine", cast(Any, refine_fn))
@@ -60,7 +74,7 @@ def create_eval_optimize_subgraph(
     builder.add_edge(START, "evaluate")
     builder.add_conditional_edges(
         "evaluate",
-        should_refine_fn,
+        should_refine_with_guard,
         {
             accepted_route: END,
             refine_route: "refine",
@@ -79,7 +93,7 @@ def create_analyst_subgraph(
     eval_optimize_graph: Any,
     build_completed_fn: Callable[[Any], dict[str, Any]],
     state_schema: type,
-    eval_state_schema: type,
+    max_iterations: int = 3,
 ) -> Any:
     """Build a compiled analyst subgraph with embedded eval-optimize loop.
 
@@ -96,7 +110,7 @@ def create_analyst_subgraph(
         eval_optimize_graph: Compiled eval-optimize subgraph.
         build_completed_fn: Node that packages final output.
         state_schema: The analyst TypedDict state.
-        eval_state_schema: The eval-optimize TypedDict state.
+        max_iterations: Safety limit passed to the eval-optimize subgraph.
 
     Returns:
         A compiled LangGraph ``StateGraph``.
@@ -105,20 +119,6 @@ def create_analyst_subgraph(
 
     def call_eval_optimize(state: dict[str, Any]) -> dict[str, Any]:
         """Transform analyst state → eval state, invoke, transform back."""
-        eval_config_mod = None
-        max_iters = 3
-        try:
-            section = state.get("section")
-            if section and hasattr(section, "analyst_type"):
-                import importlib
-
-                eval_config_mod = importlib.import_module("eval_config")
-                cfg = eval_config_mod.get_eval_config(section.analyst_type)
-                if cfg.evaluators:
-                    max_iters = cfg.evaluators[0].max_iterations
-        except Exception:
-            pass
-
         eval_input = {
             "section_area": (
                 state.get("section", {}).area
@@ -135,7 +135,7 @@ def create_analyst_subgraph(
             "evaluation_result": None,
             "accepted": False,
             "iteration": 0,
-            "max_iterations": max_iters,
+            "max_iterations": max_iterations,
         }
 
         eval_output = eval_optimize_graph.invoke(eval_input)

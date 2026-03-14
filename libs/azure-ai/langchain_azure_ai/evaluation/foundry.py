@@ -388,6 +388,7 @@ class FoundryEvaluatorSuite:
     def __init__(self, evaluators: Sequence[FoundryEvaluator]) -> None:
         """Initialize the evaluator suite."""
         self._evaluators = list(evaluators)
+        self._last_results: list[FoundryEvalResult] = []
 
     def evaluate_all(
         self,
@@ -409,12 +410,15 @@ class FoundryEvaluatorSuite:
                 run_id=run_id,
             )
             results.append(result)
+        self._last_results = results
         return results
 
     @property
     def all_passed(self) -> bool:
         """Check if all evaluators passed on the last run."""
-        return True
+        return bool(self._last_results) and all(
+            result.passed for result in self._last_results
+        )
 
     @classmethod
     def from_config(

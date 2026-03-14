@@ -270,6 +270,29 @@ class TestFoundryEvaluatorSuite:
             )
             assert len(suite._evaluators) == 2
 
+    def test_all_passed_reflects_last_results(self) -> None:
+        from langchain_azure_ai.evaluation.foundry import (
+            FoundryEvalResult,
+            FoundryEvaluatorSuite,
+        )
+
+        evaluator_1 = MagicMock()
+        evaluator_2 = MagicMock()
+        evaluator_1.evaluate.return_value = FoundryEvalResult("eval1", passed=True)
+        evaluator_2.evaluate.return_value = FoundryEvalResult("eval2", passed=False)
+
+        suite = FoundryEvaluatorSuite([evaluator_1, evaluator_2])
+        assert suite.all_passed is False
+
+        results = suite.evaluate_all(query="q", response="r")
+
+        assert len(results) == 2
+        assert suite.all_passed is False
+
+        evaluator_2.evaluate.return_value = FoundryEvalResult("eval2", passed=True)
+        suite.evaluate_all(query="q", response="r")
+        assert suite.all_passed is True
+
 
 # ============================================================
 # Tests for tracer emit_evaluation_event
@@ -472,3 +495,39 @@ class TestCreateEvalOptimizeSubgraph:
         )
         assert call_count["evaluate"] == 2
         assert "+" in result["value"]
+
+    def test_max_iterations_forces_accepted_route(self) -> None:
+        from typing_extensions import TypedDict
+
+        from langchain_azure_ai.evaluation.helpers import create_eval_optimize_subgraph
+
+        class TestState(TypedDict):
+            value: str
+            accepted: bool
+
+        call_count = {"evaluate": 0, "refine": 0}
+
+        def evaluate(state: dict[str, Any]) -> dict[str, Any]:
+            call_count["evaluate"] += 1
+            return {"accepted": False, "value": state["value"]}
+
+        def refine(state: dict[str, Any]) -> dict[str, Any]:
+            call_count["refine"] += 1
+            return {"value": state["value"] + "+"}
+
+        def should_refine(_: dict[str, Any]) -> str:
+            return "refine"
+
+        graph = create_eval_optimize_subgraph(
+            evaluate_fn=evaluate,
+            refine_fn=refine,
+            should_refine_fn=should_refine,
+            state_schema=TestState,
+            max_iterations=2,
+        )
+
+        result = graph.invoke({"value": "draft", "accepted": False})
+
+        assert result["accepted"] is False
+        assert result["value"] == "draft+"
+        assert call_count == {"evaluate": 2, "refine": 1}
