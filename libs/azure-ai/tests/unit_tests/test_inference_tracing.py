@@ -961,17 +961,14 @@ def test_streaming_token_event(monkeypatch: pytest.MonkeyPatch) -> None:
     span = get_last_span_for(t)
     ttfc = get_histogram(t, "gen_ai.client.operation.time_to_first_chunk")
     assert span.events == []
-    assert ttfc.records == [
-        (
-            0.30000000000000004,
-            {
-                tracing.Attrs.PROVIDER_NAME: "azure.ai.openai",
-                tracing.Attrs.OPERATION_NAME: "text_completion",
-                tracing.Attrs.REQUEST_MODEL: "m",
-                tracing.Attrs.SERVER_ADDRESS: "example.openai.azure.com",
-            },
-        )
-    ]
+    assert len(ttfc.records) == 1
+    assert ttfc.records[0][0] == pytest.approx(0.3)
+    assert ttfc.records[0][1] == {
+        tracing.Attrs.PROVIDER_NAME: "azure.ai.openai",
+        tracing.Attrs.OPERATION_NAME: "text_completion",
+        tracing.Attrs.REQUEST_MODEL: "m",
+        tracing.Attrs.SERVER_ADDRESS: "example.openai.azure.com",
+    }
 
 
 def test_llm_end_records_gen_ai_client_metrics(
