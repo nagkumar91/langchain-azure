@@ -21,7 +21,7 @@ class MockSpan:
         self.attributes = dict(attributes or {})
         self.events: list[tuple[str, dict[str, object]]] = []
         self.ended = False
-        self.status = None
+        self.status: object = None
         self.exceptions: list[Exception] = []
         self._context = SimpleNamespace(is_valid=True)
 
