@@ -16,21 +16,25 @@ try:
     from opentelemetry.instrumentation.instrumentor import (  # type: ignore[attr-defined]
         BaseInstrumentor,
     )
-    from opentelemetry.instrumentation.utils import unwrap
 except ImportError as exc:
     _OTEL_INSTRUMENTATION_IMPORT_ERROR: Exception | None = exc
 
     class BaseInstrumentor:  # type: ignore[no-redef]
         """Fallback base class when opentelemetry instrumentation is unavailable."""
 
-        pass
+        def instrument(self, **kwargs: Any) -> None:
+            """Raise a clear error when OTel instrumentation is not installed."""
+            raise ImportError(
+                "Azure auto tracing requires 'opentelemetry-instrumentation'. "
+                "Install it via: pip install opentelemetry-instrumentation"
+            ) from _OTEL_INSTRUMENTATION_IMPORT_ERROR
 
-    def unwrap(*args: Any, **kwargs: Any) -> None:  # type: ignore[no-redef]
-        """Fallback unwrap that raises a clear dependency error."""
-        raise ImportError(
-            "Azure auto tracing requires 'opentelemetry-instrumentation'. "
-            "Install it via: pip install opentelemetry-instrumentation"
-        ) from _OTEL_INSTRUMENTATION_IMPORT_ERROR
+        def uninstrument(self, **kwargs: Any) -> None:
+            """Raise a clear error when OTel instrumentation is not installed."""
+            raise ImportError(
+                "Azure auto tracing requires 'opentelemetry-instrumentation'. "
+                "Install it via: pip install opentelemetry-instrumentation"
+            ) from _OTEL_INSTRUMENTATION_IMPORT_ERROR
 
 else:
     _OTEL_INSTRUMENTATION_IMPORT_ERROR = None
@@ -93,15 +97,6 @@ def _ensure_wrapt_available() -> None:
         ) from _WRAPT_IMPORT_ERROR
 
 
-def _ensure_otel_instrumentation_available() -> None:
-    """Ensure OpenTelemetry instrumentation package is installed."""
-    if _OTEL_INSTRUMENTATION_IMPORT_ERROR is not None:
-        raise ImportError(
-            "Azure auto tracing requires 'opentelemetry-instrumentation'. "
-            "Install it via: pip install opentelemetry-instrumentation"
-        ) from _OTEL_INSTRUMENTATION_IMPORT_ERROR
-
-
 def _load_tracer_class() -> type[AzureAIOpenTelemetryTracer]:
     """Load Azure tracer class lazily with a clear dependency error."""
     try:
@@ -147,10 +142,10 @@ def enable_auto_tracing(
         return
 
     _ensure_wrapt_available()
-    tracer_class = _load_tracer_class()
     assert wrap_function_wrapper is not None
 
     if tracer is None:
+        tracer_class = _load_tracer_class()
         resolved_connection_string = connection_string or os.getenv(
             _ENV_CONNECTION_STRING
         )
@@ -193,11 +188,11 @@ def disable_auto_tracing() -> None:
     if _active_tracer is None:
         return
 
-    _ensure_otel_instrumentation_available()
-
     from langchain_core.callbacks import BaseCallbackManager
 
-    unwrap(BaseCallbackManager, "__init__")
+    # Restore the original __init__ by unwrapping the wrapt patch.
+    if hasattr(BaseCallbackManager.__init__, "__wrapped__"):
+        BaseCallbackManager.__init__ = BaseCallbackManager.__init__.__wrapped__  # type: ignore[method-assign]
     _active_tracer = None
 
 
