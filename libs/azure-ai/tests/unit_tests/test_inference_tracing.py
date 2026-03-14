@@ -1019,6 +1019,43 @@ def test_streaming_metrics_record_subsequent_output_chunks(
     assert per_chunk.records[1][1] == per_chunk.records[0][1]
 
 
+def test_streaming_cache_invalidated_when_response_model_arrives(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timings = iter([7.0, 7.2, 7.9])
+    monkeypatch.setattr(tracing.time, "perf_counter", lambda: next(timings))
+    tracer = tracing.AzureAIOpenTelemetryTracer()
+    run_id = uuid4()
+    tracer.on_llm_start(
+        {"kwargs": {"model": "gpt-4o"}},
+        cast(List[str], [{"role": "user", "content": "hello"}]),
+        run_id=run_id,
+        invocation_params={
+            "model": "gpt-4o",
+            "base_url": "https://example.openai.azure.com",
+        },
+    )
+
+    tracer.on_llm_new_token("first", run_id=run_id)
+    tracer.on_llm_end(
+        LLMResult(
+            generations=[[ChatGeneration(message=AIMessage(content="done"))]],
+            llm_output={
+                "model_name": "gpt-4o-mini",
+                "token_usage": {"input_tokens": 1, "output_tokens": 2},
+            },
+        ),
+        run_id=run_id,
+    )
+
+    token_usage = get_histogram(tracer, "gen_ai.client.token.usage")
+    duration = get_histogram(tracer, "gen_ai.client.operation.duration")
+
+    assert token_usage.records[0][1][tracing.Attrs.RESPONSE_MODEL] == "gpt-4o-mini"
+    assert token_usage.records[1][1][tracing.Attrs.RESPONSE_MODEL] == "gpt-4o-mini"
+    assert duration.records[0][1][tracing.Attrs.RESPONSE_MODEL] == "gpt-4o-mini"
+
+
 def test_llm_error_records_duration_metric_with_error_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1971,6 +1971,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         if "model_name" in llm_output:
             record.span.set_attribute(Attrs.RESPONSE_MODEL, llm_output["model_name"])
             record.attributes[Attrs.RESPONSE_MODEL] = llm_output["model_name"]
+            record.stash.pop("_metric_attrs_cache", None)
         if llm_output.get("system_fingerprint"):
             record.span.set_attribute(
                 Attrs.OPENAI_RESPONSE_SYSTEM_FINGERPRINT,
@@ -2552,7 +2553,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             parent_run_id=resolved_parent_key,
             attributes=attributes or {},
         )
-        span_record.stash["started_at"] = time.perf_counter()
+        if _is_model_operation(operation):
+            span_record.stash["started_at"] = time.perf_counter()
         self._spans[run_key] = span_record
         self._run_parent_override[run_key] = resolved_parent_key
         # Publish the agent span context so asyncio.create_task() inherits
