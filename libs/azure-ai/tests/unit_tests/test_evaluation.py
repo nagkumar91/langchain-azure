@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -248,6 +251,95 @@ class TestFoundryEvaluator:
         assert result.passed is False
         assert result.label == "error"
         assert "failed" in (result.explanation or "").lower()
+
+    def test_get_client_reuses_cached_clients(self) -> None:
+        from langchain_azure_ai.evaluation.foundry import FoundryEvaluator
+
+        mock_project_client = MagicMock()
+        mock_openai_client = MagicMock()
+        mock_project_client.get_openai_client.return_value = mock_openai_client
+
+        evaluator = FoundryEvaluator.__new__(FoundryEvaluator)
+        evaluator._project_endpoint = "https://test.endpoint"
+        evaluator._credential = object()
+        evaluator._project_client = None
+        evaluator._openai_client = None
+        evaluator._client_lock = threading.Lock()
+        evaluator._eval_definition_lock = threading.Lock()
+
+        with patch.dict(
+            "sys.modules",
+            {
+                "azure.ai.projects": SimpleNamespace(
+                    AIProjectClient=MagicMock(return_value=mock_project_client)
+                ),
+                "azure.core.pipeline.policies": SimpleNamespace(
+                    UserAgentPolicy=MagicMock()
+                ),
+            },
+        ):
+            project_client_1, client_1 = evaluator._get_client()
+            project_client_2, client_2 = evaluator._get_client()
+
+        assert project_client_1 is project_client_2 is mock_project_client
+        assert client_1 is client_2 is mock_openai_client
+        mock_project_client.get_openai_client.assert_called_once()
+
+    def test_evaluate_times_out_with_failed_result(self) -> None:
+        from langchain_azure_ai.evaluation.foundry import FoundryEvaluator
+
+        mock_client = MagicMock()
+        mock_run = MagicMock(id="run-1", status="in_progress")
+        mock_client.evals.runs.create.return_value = mock_run
+        mock_client.evals.runs.retrieve.return_value = mock_run
+
+        evaluator = FoundryEvaluator.__new__(FoundryEvaluator)
+        evaluator._display_name = "test_eval"
+        evaluator._poll_interval = 5.0
+        evaluator._max_wait = 10.0
+
+        with (
+            patch.object(
+                evaluator, "_get_client", return_value=(MagicMock(), mock_client)
+            ),
+            patch.object(evaluator, "_ensure_eval_definition", return_value="eval-1"),
+            patch(
+                "langchain_azure_ai.evaluation.foundry.time.monotonic",
+                side_effect=[0.0, 1.0, 11.0],
+            ),
+            patch("langchain_azure_ai.evaluation.foundry.time.sleep") as sleep_mock,
+        ):
+            result = evaluator.evaluate(query="q", response="r")
+
+        assert result.passed is False
+        assert result.label == "error"
+        assert "timed out" in (result.explanation or "").lower()
+        sleep_mock.assert_called_once_with(5.0)
+
+    def test_parse_result_applies_label_override_for_sample_results(self) -> None:
+        from langchain_azure_ai.evaluation.foundry import FoundryEvaluator
+
+        sample_result = SimpleNamespace(
+            passed=True,
+            label="fail",
+            score=0.1,
+            reason="Label should win",
+        )
+        output_item = SimpleNamespace(
+            sample=SimpleNamespace(results={"grader": sample_result})
+        )
+
+        client = MagicMock()
+        client.evals.runs.output_items.list.return_value = [output_item]
+
+        evaluator = FoundryEvaluator.__new__(FoundryEvaluator)
+        evaluator._display_name = "test_eval"
+
+        result = evaluator._parse_result(client, "eval-1", "run-1", "completed")
+
+        assert result.passed is False
+        assert result.label == "fail"
+        assert result.score == 0.1
 
 
 class TestFoundryEvaluatorSuite:
@@ -531,3 +623,143 @@ class TestCreateEvalOptimizeSubgraph:
         assert result["accepted"] is False
         assert result["value"] == "draft+"
         assert call_count == {"evaluate": 2, "refine": 1}
+
+    def test_max_iterations_are_tracked_per_concurrent_invocation(self) -> None:
+        from typing_extensions import TypedDict
+
+        from langchain_azure_ai.evaluation.helpers import create_eval_optimize_subgraph
+
+        class TestState(TypedDict):
+            value: str
+            accepted: bool
+
+        evaluate_barrier = threading.Barrier(2)
+        call_count = {"evaluate": 0, "refine": 0}
+
+        def evaluate(state: dict[str, Any]) -> dict[str, Any]:
+            call_count["evaluate"] += 1
+            if call_count["evaluate"] <= 2:
+                evaluate_barrier.wait(timeout=2)
+            return {"accepted": False, "value": state["value"]}
+
+        def refine(state: dict[str, Any]) -> dict[str, Any]:
+            call_count["refine"] += 1
+            return {"value": state["value"] + "+"}
+
+        graph = create_eval_optimize_subgraph(
+            evaluate_fn=evaluate,
+            refine_fn=refine,
+            should_refine_fn=lambda _: "refine",
+            state_schema=TestState,
+            max_iterations=2,
+        )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(graph.invoke, {"value": "draft", "accepted": False})
+                for _ in range(2)
+            ]
+            results = [future.result() for future in futures]
+
+        assert [result["value"] for result in results] == ["draft+", "draft+"]
+        assert call_count == {"evaluate": 4, "refine": 2}
+
+
+class TestCreateAnalystSubgraph:
+    """Test the analyst subgraph builder."""
+
+    def test_custom_state_mapping_supports_reusable_state_shape(self) -> None:
+        from typing_extensions import TypedDict
+
+        from langchain_azure_ai.evaluation.helpers import create_analyst_subgraph
+
+        class AnalystState(TypedDict):
+            topic: str
+            draft: str
+            final_output: str
+
+        eval_graph = MagicMock()
+        eval_graph.invoke.return_value = {
+            "optimized_draft": "draft content optimized",
+            "score": "pass",
+        }
+
+        def research(state: dict[str, Any]) -> dict[str, Any]:
+            return {"topic": state["topic"]}
+
+        def write(_: dict[str, Any]) -> dict[str, Any]:
+            return {"draft": "draft content"}
+
+        def build_completed(state: dict[str, Any]) -> dict[str, Any]:
+            return {"final_output": state["draft"]}
+
+        graph = create_analyst_subgraph(
+            research_fn=research,
+            write_fn=write,
+            eval_optimize_graph=eval_graph,
+            build_completed_fn=build_completed,
+            state_schema=AnalystState,
+            state_to_eval_input=lambda state, iteration_limit: {
+                "content": state["draft"],
+                "limit": iteration_limit,
+            },
+            eval_output_to_state=lambda _state, eval_output: {
+                "draft": eval_output["optimized_draft"]
+            },
+        )
+
+        result = graph.invoke({"topic": "Azure", "draft": "", "final_output": ""})
+
+        eval_graph.invoke.assert_called_once_with(
+            {"content": "draft content", "limit": 3}
+        )
+        assert result["final_output"] == "draft content optimized"
+
+    def test_default_state_mapping_supports_mapping_sections(self) -> None:
+        from typing_extensions import TypedDict
+
+        from langchain_azure_ai.evaluation.helpers import create_analyst_subgraph
+
+        class AnalystState(TypedDict):
+            section: dict[str, str]
+            draft_content: str
+            evaluation_result: str | None
+            iteration_count: int
+
+        eval_graph = MagicMock()
+        eval_graph.invoke.return_value = {
+            "draft_content": "refined draft",
+            "evaluation_result": "pass",
+            "iteration": 1,
+        }
+
+        graph = create_analyst_subgraph(
+            research_fn=lambda state: {"section": state["section"]},
+            write_fn=lambda state: {"draft_content": state["draft_content"]},
+            eval_optimize_graph=eval_graph,
+            build_completed_fn=lambda state: {"draft_content": state["draft_content"]},
+            state_schema=AnalystState,
+        )
+
+        result = graph.invoke(
+            {
+                "section": {"area": "finance", "title": "Summary"},
+                "draft_content": "draft",
+                "evaluation_result": None,
+                "iteration_count": 0,
+            }
+        )
+
+        eval_graph.invoke.assert_called_once_with(
+            {
+                "section_area": "finance",
+                "section_title": "Summary",
+                "draft_content": "draft",
+                "evaluation_feedback": "",
+                "evaluation_result": None,
+                "accepted": False,
+                "iteration": 0,
+                "max_iterations": 3,
+            }
+        )
+        assert result["draft_content"] == "refined draft"

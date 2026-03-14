@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import importlib.metadata
 import logging
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Sequence
@@ -31,6 +32,19 @@ try:
 except importlib.metadata.PackageNotFoundError:
     _PACKAGE_VERSION = "0.0.0"
 _USER_AGENT = f"{_PACKAGE_NAME}/{_PACKAGE_VERSION}"
+
+
+def _apply_label_override(passed: bool, label: str | None) -> bool:
+    """Normalize pass/fail labels into the returned pass state."""
+    if label is None:
+        return passed
+
+    normalized = label.strip().lower()
+    if normalized in {"pass", "passed"}:
+        return True
+    if normalized in {"fail", "failed"}:
+        return False
+    return passed
 
 
 @dataclass
@@ -90,28 +104,53 @@ class FoundryEvaluator:
         self._credential = credential
 
         self._eval_id: str | None = None
+        self._project_client: Any | None = None
+        self._openai_client: Any | None = None
+        self._client_lock = threading.Lock()
+        self._eval_definition_lock = threading.Lock()
 
     def _get_client(self) -> tuple[Any, Any]:
-        """Create the AIProjectClient and OpenAI client.
+        """Create or reuse the AIProjectClient and OpenAI client.
 
         Configures the client with:
         - Custom user-agent: ``langchain-azure-ai/<version>``
         - W3C traceparent propagation via ``opentelemetry.propagate.inject``
         """
+        if self._project_client is not None and self._openai_client is not None:
+            return self._project_client, self._openai_client
+
         from azure.ai.projects import AIProjectClient
         from azure.core.pipeline.policies import UserAgentPolicy
 
-        user_agent_policy = UserAgentPolicy(
-            user_agent=_USER_AGENT,
-        )
-        project_client = AIProjectClient(
-            endpoint=self._project_endpoint,
-            credential=self._credential,
-            per_call_policies=[user_agent_policy],
-        )
-        # The OpenAI client inherits the project client's transport
-        # and will carry the user-agent through Azure pipeline policies.
-        return project_client, project_client.get_openai_client()
+        with self._client_lock:
+            if self._project_client is None or self._openai_client is None:
+                user_agent_policy = UserAgentPolicy(
+                    user_agent=_USER_AGENT,
+                )
+                project_client = AIProjectClient(
+                    endpoint=self._project_endpoint,
+                    credential=self._credential,
+                    per_call_policies=[user_agent_policy],
+                )
+                self._project_client = project_client
+                # The OpenAI client inherits the project client's transport
+                # and will carry the user-agent through Azure pipeline policies.
+                self._openai_client = project_client.get_openai_client()
+
+        return self._project_client, self._openai_client
+
+    def close(self) -> None:
+        """Close cached project resources."""
+        with self._client_lock:
+            if self._project_client is None:
+                return
+            try:
+                self._project_client.close()
+            except Exception:
+                LOGGER.debug("Failed to close Foundry project client", exc_info=True)
+            finally:
+                self._project_client = None
+                self._openai_client = None
 
     def _ensure_eval_definition(self, client: Any) -> str:
         """Create the eval definition if not already created."""
@@ -120,58 +159,62 @@ class FoundryEvaluator:
 
         from openai.types.eval_create_params import DataSourceConfigCustom
 
-        data_source_config = DataSourceConfigCustom(
-            {
-                "type": "custom",
-                "item_schema": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "anyOf": [
-                                {"type": "string"},
-                                {"type": "array", "items": {"type": "object"}},
-                            ]
+        with self._eval_definition_lock:
+            if self._eval_id is not None:
+                return self._eval_id
+
+            data_source_config = DataSourceConfigCustom(
+                {
+                    "type": "custom",
+                    "item_schema": {
+                        "type": "object",
+                        "properties": {
+                            "query": {
+                                "anyOf": [
+                                    {"type": "string"},
+                                    {"type": "array", "items": {"type": "object"}},
+                                ]
+                            },
+                            "response": {
+                                "anyOf": [
+                                    {"type": "string"},
+                                    {"type": "array", "items": {"type": "object"}},
+                                ]
+                            },
+                            "tool_definitions": {
+                                "anyOf": [
+                                    {"type": "object"},
+                                    {"type": "array", "items": {"type": "object"}},
+                                ]
+                            },
                         },
-                        "response": {
-                            "anyOf": [
-                                {"type": "string"},
-                                {"type": "array", "items": {"type": "object"}},
-                            ]
-                        },
-                        "tool_definitions": {
-                            "anyOf": [
-                                {"type": "object"},
-                                {"type": "array", "items": {"type": "object"}},
-                            ]
-                        },
+                        "required": ["query", "response"],
                     },
-                    "required": ["query", "response"],
-                },
-                "include_sample_schema": True,
-            }
-        )
+                    "include_sample_schema": True,
+                }
+            )
 
-        testing_criteria = [
-            {
-                "type": "azure_ai_evaluator",
-                "name": self._display_name,
-                "evaluator_name": self._evaluator_name,
-                "initialization_parameters": {
-                    "deployment_name": self._deployment_name,
-                },
-                "data_mapping": {
-                    "query": "{{item.query}}",
-                    "response": "{{item.response}}",
-                },
-            }
-        ]
+            testing_criteria = [
+                {
+                    "type": "azure_ai_evaluator",
+                    "name": self._display_name,
+                    "evaluator_name": self._evaluator_name,
+                    "initialization_parameters": {
+                        "deployment_name": self._deployment_name,
+                    },
+                    "data_mapping": {
+                        "query": "{{item.query}}",
+                        "response": "{{item.response}}",
+                    },
+                }
+            ]
 
-        eval_obj = client.evals.create(
-            name=f"LangGraph {self._display_name} Eval",
-            data_source_config=data_source_config,
-            testing_criteria=testing_criteria,
-        )
-        self._eval_id = eval_obj.id
+            eval_obj = client.evals.create(
+                name=f"LangGraph {self._display_name} Eval",
+                data_source_config=data_source_config,
+                testing_criteria=testing_criteria,
+            )
+            self._eval_id = eval_obj.id
         return self._eval_id
 
     def evaluate(
@@ -215,7 +258,7 @@ class FoundryEvaluator:
         except Exception:
             pass  # OTel not available or no active context
 
-        project_client, client = self._get_client()
+        _, client = self._get_client()
 
         # Apply traceparent as extra headers on the OpenAI client
         if trace_headers:
@@ -226,59 +269,59 @@ class FoundryEvaluator:
             except Exception:
                 LOGGER.debug("Could not set traceparent headers on OpenAI client")
 
-        try:
-            eval_id = self._ensure_eval_definition(client)
+        eval_id = self._ensure_eval_definition(client)
 
-            eval_run = client.evals.runs.create(
-                eval_id=eval_id,
-                name=f"{self._display_name}_run",
-                data_source=CreateEvalJSONLRunDataSourceParam(
-                    type="jsonl",
-                    source=SourceFileContent(
-                        type="file_content",
-                        content=[
-                            SourceFileContentContent(
-                                item={
-                                    "query": query,
-                                    "response": response,
-                                    "tool_definitions": tool_definitions,
-                                }
-                            ),
-                        ],
-                    ),
+        eval_run = client.evals.runs.create(
+            eval_id=eval_id,
+            name=f"{self._display_name}_run",
+            data_source=CreateEvalJSONLRunDataSourceParam(
+                type="jsonl",
+                source=SourceFileContent(
+                    type="file_content",
+                    content=[
+                        SourceFileContentContent(
+                            item={
+                                "query": query,
+                                "response": response,
+                                "tool_definitions": tool_definitions,
+                            }
+                        ),
+                    ],
                 ),
-            )
+            ),
+        )
 
-            elapsed = 0.0
-            run = eval_run
-            while elapsed < self._max_wait:
-                run = client.evals.runs.retrieve(run_id=eval_run.id, eval_id=eval_id)
-                if run.status in ("completed", "failed"):
-                    break
-                time.sleep(self._poll_interval)
-                elapsed += self._poll_interval
+        deadline = time.monotonic() + self._max_wait
+        run = eval_run
+        while True:
+            run = client.evals.runs.retrieve(run_id=eval_run.id, eval_id=eval_id)
+            if run.status in ("completed", "failed"):
+                break
 
-            result = self._parse_result(client, eval_id, eval_run.id, run.status)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
 
-            if tracer is not None:
-                try:
-                    tracer.emit_evaluation_event(
-                        evaluation_name=self._display_name,
-                        score_value=result.score,
-                        score_label=result.label,
-                        explanation=result.explanation,
-                        run_id=run_id,
-                    )
-                except Exception:
-                    LOGGER.debug("Failed to emit evaluation event", exc_info=True)
+            time.sleep(min(self._poll_interval, remaining))
 
-            return result
+        final_status = (
+            run.status if run.status in ("completed", "failed") else "timeout"
+        )
+        result = self._parse_result(client, eval_id, eval_run.id, final_status)
 
-        finally:
+        if tracer is not None:
             try:
-                project_client.close()
+                tracer.emit_evaluation_event(
+                    evaluation_name=self._display_name,
+                    score_value=result.score,
+                    score_label=result.label,
+                    explanation=result.explanation,
+                    run_id=run_id,
+                )
             except Exception:
-                pass
+                LOGGER.debug("Failed to emit evaluation event", exc_info=True)
+
+        return result
 
     def _parse_result(
         self,
@@ -288,12 +331,20 @@ class FoundryEvaluator:
         status: str,
     ) -> FoundryEvalResult:
         """Parse the evaluation run output into a result."""
-        if status == "failed":
+        if status != "completed":
+            terminal_explanation = (
+                f"Evaluation run did not complete successfully. Final status: {status}"
+            )
+            if status == "timeout":
+                terminal_explanation = (
+                    "Evaluation run timed out before reaching a terminal status. "
+                    f"Final status: {status}"
+                )
             return FoundryEvalResult(
                 evaluator_name=self._display_name,
                 passed=False,
                 label="error",
-                explanation=f"Evaluation run failed with status: {status}",
+                explanation=terminal_explanation,
             )
 
         try:
@@ -317,11 +368,11 @@ class FoundryEvaluator:
             )
 
         item = output_items[0]
-        raw = {}
+        raw: dict[str, Any] = {}
         passed = False
-        score = None
-        label = None
-        explanation = None
+        score: float | None = None
+        label: str | None = None
+        explanation: str | None = None
 
         try:
             if hasattr(item, "results") and item.results:
@@ -335,7 +386,6 @@ class FoundryEvaluator:
                         passed = bool(result_item.passed)
                     if hasattr(result_item, "label"):
                         label = str(result_item.label)
-                        passed = label.lower() == "pass"
                     if hasattr(result_item, "score"):
                         score = (
                             float(result_item.score)
@@ -364,6 +414,7 @@ class FoundryEvaluator:
             LOGGER.debug("Error parsing eval result: %s", e)
             explanation = f"Parse error: {e}"
 
+        passed = _apply_label_override(passed, label)
         if label is None:
             label = "pass" if passed else "fail"
 
