@@ -15,6 +15,7 @@ Usage requires ``azure-ai-projects >= 2.0.0`` and a Foundry project endpoint.
 
 from __future__ import annotations
 
+import importlib.metadata
 import logging
 import time
 from dataclasses import dataclass, field
@@ -23,6 +24,13 @@ from typing import Any, Sequence
 from langchain_azure_ai._api.base import experimental
 
 LOGGER = logging.getLogger(__name__)
+
+_PACKAGE_NAME = "langchain-azure-ai"
+try:
+    _PACKAGE_VERSION = importlib.metadata.version(_PACKAGE_NAME)
+except importlib.metadata.PackageNotFoundError:
+    _PACKAGE_VERSION = "0.0.0"
+_USER_AGENT = f"{_PACKAGE_NAME}/{_PACKAGE_VERSION}"
 
 
 @dataclass
@@ -84,13 +92,25 @@ class FoundryEvaluator:
         self._eval_id: str | None = None
 
     def _get_client(self) -> tuple[Any, Any]:
-        """Create the AIProjectClient and OpenAI client."""
-        from azure.ai.projects import AIProjectClient
+        """Create the AIProjectClient and OpenAI client.
 
+        Configures the client with:
+        - Custom user-agent: ``langchain-azure-ai/<version>``
+        - W3C traceparent propagation via ``opentelemetry.propagate.inject``
+        """
+        from azure.ai.projects import AIProjectClient
+        from azure.core.pipeline.policies import UserAgentPolicy
+
+        user_agent_policy = UserAgentPolicy(
+            user_agent=_USER_AGENT,
+        )
         project_client = AIProjectClient(
             endpoint=self._project_endpoint,
             credential=self._credential,
+            per_call_policies=[user_agent_policy],
         )
+        # The OpenAI client inherits the project client's transport
+        # and will carry the user-agent through Azure pipeline policies.
         return project_client, project_client.get_openai_client()
 
     def _ensure_eval_definition(self, client: Any) -> str:
@@ -165,6 +185,10 @@ class FoundryEvaluator:
     ) -> FoundryEvalResult:
         """Run a single evaluation against Foundry.
 
+        Propagates the current OpenTelemetry trace context (W3C
+        ``traceparent``) to the Foundry API so evaluation spans are
+        correlated with the calling agent's trace.
+
         Args:
             query: The query in Foundry format (string or message array).
             response: The response in Foundry format.
@@ -182,7 +206,25 @@ class FoundryEvaluator:
             SourceFileContentContent,
         )
 
+        # Inject W3C traceparent from the current OTel context
+        trace_headers: dict[str, str] = {}
+        try:
+            from opentelemetry.propagate import inject
+
+            inject(trace_headers)
+        except Exception:
+            pass  # OTel not available or no active context
+
         project_client, client = self._get_client()
+
+        # Apply traceparent as extra headers on the OpenAI client
+        if trace_headers:
+            try:
+                client = client.with_options(
+                    default_headers=trace_headers,
+                )
+            except Exception:
+                LOGGER.debug("Could not set traceparent headers on OpenAI client")
 
         try:
             eval_id = self._ensure_eval_definition(client)
