@@ -929,7 +929,7 @@ def test_llm_end_records_gen_ai_client_metrics(
     run_id = uuid4()
     tracer.on_llm_start(
         {"kwargs": {"model": "gpt-4o"}},
-        ["hello"],
+        cast(List[str], [{"role": "user", "content": "hello"}]),
         run_id=run_id,
         invocation_params={
             "model": "gpt-4o",
@@ -950,42 +950,34 @@ def test_llm_end_records_gen_ai_client_metrics(
     token_usage = get_histogram(tracer, "gen_ai.client.token.usage")
     duration = get_histogram(tracer, "gen_ai.client.operation.duration")
 
-    assert token_usage.records == [
-        (
-            5.0,
-            {
-                tracing.Attrs.PROVIDER_NAME: "azure.ai.openai",
-                tracing.Attrs.OPERATION_NAME: "text_completion",
-                tracing.Attrs.REQUEST_MODEL: "gpt-4o",
-                tracing.Attrs.RESPONSE_MODEL: "gpt-4o-mini",
-                tracing.Attrs.SERVER_ADDRESS: "example.openai.azure.com",
-                tracing.Attrs.TOKEN_TYPE: "input",
-            },
-        ),
-        (
-            2.0,
-            {
-                tracing.Attrs.PROVIDER_NAME: "azure.ai.openai",
-                tracing.Attrs.OPERATION_NAME: "text_completion",
-                tracing.Attrs.REQUEST_MODEL: "gpt-4o",
-                tracing.Attrs.RESPONSE_MODEL: "gpt-4o-mini",
-                tracing.Attrs.SERVER_ADDRESS: "example.openai.azure.com",
-                tracing.Attrs.TOKEN_TYPE: "output",
-            },
-        ),
-    ]
-    assert duration.records == [
-        (
-            2.5,
-            {
-                tracing.Attrs.PROVIDER_NAME: "azure.ai.openai",
-                tracing.Attrs.OPERATION_NAME: "text_completion",
-                tracing.Attrs.REQUEST_MODEL: "gpt-4o",
-                tracing.Attrs.RESPONSE_MODEL: "gpt-4o-mini",
-                tracing.Attrs.SERVER_ADDRESS: "example.openai.azure.com",
-            },
-        )
-    ]
+    assert len(token_usage.records) == 2
+    assert token_usage.records[0][0] == pytest.approx(5.0)
+    assert token_usage.records[1][0] == pytest.approx(2.0)
+    assert token_usage.records[0][1] == {
+        tracing.Attrs.PROVIDER_NAME: "azure.ai.openai",
+        tracing.Attrs.OPERATION_NAME: "text_completion",
+        tracing.Attrs.REQUEST_MODEL: "gpt-4o",
+        tracing.Attrs.RESPONSE_MODEL: "gpt-4o-mini",
+        tracing.Attrs.SERVER_ADDRESS: "example.openai.azure.com",
+        tracing.Attrs.TOKEN_TYPE: "input",
+    }
+    assert token_usage.records[1][1] == {
+        tracing.Attrs.PROVIDER_NAME: "azure.ai.openai",
+        tracing.Attrs.OPERATION_NAME: "text_completion",
+        tracing.Attrs.REQUEST_MODEL: "gpt-4o",
+        tracing.Attrs.RESPONSE_MODEL: "gpt-4o-mini",
+        tracing.Attrs.SERVER_ADDRESS: "example.openai.azure.com",
+        tracing.Attrs.TOKEN_TYPE: "output",
+    }
+    assert len(duration.records) == 1
+    assert duration.records[0][0] == pytest.approx(2.5)
+    assert duration.records[0][1] == {
+        tracing.Attrs.PROVIDER_NAME: "azure.ai.openai",
+        tracing.Attrs.OPERATION_NAME: "text_completion",
+        tracing.Attrs.REQUEST_MODEL: "gpt-4o",
+        tracing.Attrs.RESPONSE_MODEL: "gpt-4o-mini",
+        tracing.Attrs.SERVER_ADDRESS: "example.openai.azure.com",
+    }
 
 
 def test_streaming_metrics_record_subsequent_output_chunks(
@@ -997,7 +989,7 @@ def test_streaming_metrics_record_subsequent_output_chunks(
     run_id = uuid4()
     tracer.on_llm_start(
         {"kwargs": {"model": "gpt-4o"}},
-        ["hello"],
+        cast(List[str], [{"role": "user", "content": "hello"}]),
         run_id=run_id,
         invocation_params={
             "model": "gpt-4o",
@@ -1016,30 +1008,18 @@ def test_streaming_metrics_record_subsequent_output_chunks(
         run_id=run_id,
     )
 
-    per_chunk = get_histogram(
-        tracer, "gen_ai.client.operation.time_per_output_chunk"
-    )
+    per_chunk = get_histogram(tracer, "gen_ai.client.operation.time_per_output_chunk")
 
-    assert per_chunk.records == [
-        (
-            0.5,
-            {
-                tracing.Attrs.PROVIDER_NAME: "azure.ai.openai",
-                tracing.Attrs.OPERATION_NAME: "text_completion",
-                tracing.Attrs.REQUEST_MODEL: "gpt-4o",
-                tracing.Attrs.SERVER_ADDRESS: "example.openai.azure.com",
-            },
-        ),
-        (
-            0.5,
-            {
-                tracing.Attrs.PROVIDER_NAME: "azure.ai.openai",
-                tracing.Attrs.OPERATION_NAME: "text_completion",
-                tracing.Attrs.REQUEST_MODEL: "gpt-4o",
-                tracing.Attrs.SERVER_ADDRESS: "example.openai.azure.com",
-            },
-        ),
-    ]
+    assert len(per_chunk.records) == 2
+    assert per_chunk.records[0][0] == pytest.approx(0.5)
+    assert per_chunk.records[1][0] == pytest.approx(0.5)
+    assert per_chunk.records[0][1] == {
+        tracing.Attrs.PROVIDER_NAME: "azure.ai.openai",
+        tracing.Attrs.OPERATION_NAME: "text_completion",
+        tracing.Attrs.REQUEST_MODEL: "gpt-4o",
+        tracing.Attrs.SERVER_ADDRESS: "example.openai.azure.com",
+    }
+    assert per_chunk.records[1][1] == per_chunk.records[0][1]
 
 
 def test_llm_error_records_duration_metric_with_error_type(
@@ -1051,7 +1031,7 @@ def test_llm_error_records_duration_metric_with_error_type(
     run_id = uuid4()
     tracer.on_llm_start(
         {"kwargs": {"model": "gpt-4o"}},
-        ["hello"],
+        cast(List[str], [{"role": "user", "content": "hello"}]),
         run_id=run_id,
         invocation_params={
             "model": "gpt-4o",
@@ -1062,18 +1042,15 @@ def test_llm_error_records_duration_metric_with_error_type(
     tracer.on_llm_error(ValueError("boom"), run_id=run_id)
 
     duration = get_histogram(tracer, "gen_ai.client.operation.duration")
-    assert duration.records == [
-        (
-            1.2000000000000002,
-            {
-                tracing.Attrs.PROVIDER_NAME: "azure.ai.openai",
-                tracing.Attrs.OPERATION_NAME: "text_completion",
-                tracing.Attrs.REQUEST_MODEL: "gpt-4o",
-                tracing.Attrs.SERVER_ADDRESS: "example.openai.azure.com",
-                tracing.Attrs.ERROR_TYPE: "ValueError",
-            },
-        )
-    ]
+    assert len(duration.records) == 1
+    assert duration.records[0][0] == pytest.approx(1.2)
+    assert duration.records[0][1] == {
+        tracing.Attrs.PROVIDER_NAME: "azure.ai.openai",
+        tracing.Attrs.OPERATION_NAME: "text_completion",
+        tracing.Attrs.REQUEST_MODEL: "gpt-4o",
+        tracing.Attrs.SERVER_ADDRESS: "example.openai.azure.com",
+        tracing.Attrs.ERROR_TYPE: "ValueError",
+    }
 
 
 def test_synthetic_execute_tool_under_chat_parent(

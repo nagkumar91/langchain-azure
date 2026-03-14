@@ -2592,10 +2592,11 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         record = self._spans.pop(str(run_id), None)
         if not record:
             return
-        if error and status is None:
-            status = Status(StatusCode.ERROR, str(error))
+        if error:
             record.span.set_attribute(Attrs.ERROR_TYPE, error.__class__.__name__)
             record.attributes[Attrs.ERROR_TYPE] = error.__class__.__name__
+            if status is None:
+                status = Status(StatusCode.ERROR, str(error))
         if status:
             record.span.set_status(status)
         started_at = cast(Optional[float], record.stash.get("started_at"))
