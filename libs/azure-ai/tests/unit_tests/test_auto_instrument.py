@@ -4,12 +4,12 @@ from typing import Iterator
 import pytest
 from langchain_core.callbacks import BaseCallbackManager
 
-import langchain_azure_ai.callbacks.tracers.inference_tracing as tracing
-
 # Skip tests cleanly if required deps or the target module are not present.
 pytest.importorskip("azure.monitor.opentelemetry")
 pytest.importorskip("opentelemetry")
 pytest.importorskip("opentelemetry.instrumentation")
+import langchain_azure_ai.callbacks.tracers.inference_tracing as tracing
+
 auto_instrument = pytest.importorskip(
     "langchain_azure_ai.callbacks.tracers.auto_instrument"
 )
