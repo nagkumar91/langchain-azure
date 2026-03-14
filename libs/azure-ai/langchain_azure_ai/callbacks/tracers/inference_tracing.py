@@ -2282,9 +2282,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             return
         # Use cached base metric attributes when available to avoid
         # rebuilding the dict on every streaming token.
-        cached: Optional[dict[str, Any]] = record.stash.get(
-            "_metric_attrs_cache"
-        )
+        cached: Optional[dict[str, Any]] = record.stash.get("_metric_attrs_cache")
         if cached is None:
             cached = _build_gen_ai_metric_attributes(record.attributes)
             if cached is None:
