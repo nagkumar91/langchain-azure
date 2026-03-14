@@ -1082,16 +1082,21 @@ def _tool_type_from_definition(defn: dict[str, Any]) -> Optional[str]:
     return None
 
 
+_MODEL_OPERATIONS = frozenset({"chat", "text_completion"})
+
+
 def _is_model_operation(operation: str) -> bool:
-    return operation in {"chat", "text_completion"}
+    return operation in _MODEL_OPERATIONS
 
 
 def _build_gen_ai_metric_attributes(
     attributes: Mapping[str, Any],
-    *,
-    token_type: Optional[str] = None,
-    include_error_type: bool = False,
 ) -> Optional[dict[str, Any]]:
+    """Build base metric attributes dict from span attributes.
+
+    Returns only the common dimensions. Callers add token_type / error_type
+    on top of a shallow copy so the base dict can be cached per span.
+    """
     provider_name = attributes.get(Attrs.PROVIDER_NAME)
     operation_name = attributes.get(Attrs.OPERATION_NAME)
     if provider_name is None or operation_name is None:
@@ -1110,10 +1115,6 @@ def _build_gen_ai_metric_attributes(
         value = attributes.get(attr_name)
         if value is not None:
             metric_attributes[attr_name] = value
-    if include_error_type and attributes.get(Attrs.ERROR_TYPE) is not None:
-        metric_attributes[Attrs.ERROR_TYPE] = attributes[Attrs.ERROR_TYPE]
-    if token_type is not None:
-        metric_attributes[Attrs.TOKEN_TYPE] = token_type
     return metric_attributes
 
 
@@ -2288,13 +2289,21 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
     ) -> None:
         if value is None or not _is_model_operation(record.operation):
             return
-        metric_attributes = _build_gen_ai_metric_attributes(
-            record.attributes,
-            token_type=token_type,
-            include_error_type=include_error_type,
+        # Use cached base metric attributes when available to avoid
+        # rebuilding the dict on every streaming token.
+        cached: Optional[dict[str, Any]] = record.stash.get(
+            "_metric_attrs_cache"
         )
-        if metric_attributes is None:
-            return
+        if cached is None:
+            cached = _build_gen_ai_metric_attributes(record.attributes)
+            if cached is None:
+                return
+            record.stash["_metric_attrs_cache"] = cached
+        metric_attributes = dict(cached)
+        if include_error_type and record.attributes.get(Attrs.ERROR_TYPE) is not None:
+            metric_attributes[Attrs.ERROR_TYPE] = record.attributes[Attrs.ERROR_TYPE]
+        if token_type is not None:
+            metric_attributes[Attrs.TOKEN_TYPE] = token_type
         histogram.record(max(value, 0.0), attributes=metric_attributes)
 
     def _record_token_usage_metric(
@@ -2609,7 +2618,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         if status:
             record.span.set_status(status)
         started_at = cast(Optional[float], record.stash.get("started_at"))
-        if started_at is not None:
+        if started_at is not None and _is_model_operation(record.operation):
             self._record_histogram_metric(
                 self._operation_duration_histogram,
                 time.perf_counter() - started_at,
