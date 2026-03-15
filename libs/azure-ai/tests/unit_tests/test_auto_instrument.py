@@ -1,5 +1,7 @@
+import importlib
+import threading
 from types import SimpleNamespace
-from typing import Iterator
+from typing import Any, Iterator
 
 import pytest
 from langchain_core.callbacks import BaseCallbackManager
@@ -8,7 +10,9 @@ from langchain_core.callbacks import BaseCallbackManager
 pytest.importorskip("azure.monitor.opentelemetry")
 pytest.importorskip("opentelemetry")
 pytest.importorskip("opentelemetry.instrumentation")
-import langchain_azure_ai.callbacks.tracers.inference_tracing as tracing
+tracing = importlib.import_module(
+    "langchain_azure_ai.callbacks.tracers.inference_tracing"
+)
 
 auto_instrument = pytest.importorskip(
     "langchain_azure_ai.callbacks.tracers.auto_instrument"
@@ -81,7 +85,7 @@ def cleanup_auto_tracing() -> Iterator[None]:
 
 def _get_inheritable_tracers(
     manager: BaseCallbackManager,
-) -> list[tracing.AzureAIOpenTelemetryTracer]:
+) -> list[Any]:
     return [
         handler
         for handler in manager.inheritable_handlers
@@ -91,7 +95,7 @@ def _get_inheritable_tracers(
 
 def _get_all_tracers(
     manager: BaseCallbackManager,
-) -> list[tracing.AzureAIOpenTelemetryTracer]:
+) -> list[Any]:
     return [
         handler
         for handler in [*manager.handlers, *manager.inheritable_handlers]
@@ -139,6 +143,17 @@ def test_manual_and_auto_coexist() -> None:
     assert inheritable_tracers[0] is manual_tracer
 
 
+def test_manual_non_inheritable_tracer_is_not_duplicated() -> None:
+    auto_instrument.enable_auto_tracing()
+    manual_tracer = tracing.AzureAIOpenTelemetryTracer()
+
+    manager = BaseCallbackManager(handlers=[manual_tracer])
+
+    all_tracers = _get_all_tracers(manager)
+    assert len(all_tracers) == 1
+    assert all_tracers[0] is manual_tracer
+
+
 def test_is_auto_tracing_enabled() -> None:
     assert auto_instrument.is_auto_tracing_enabled() is False
 
@@ -180,3 +195,80 @@ def test_custom_tracer_instance() -> None:
     manager = BaseCallbackManager(handlers=[])
 
     assert custom_tracer in manager.inheritable_handlers
+
+
+def test_enable_auto_tracing_serializes_concurrent_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyTracer:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    wrap_started = threading.Event()
+    allow_wrap_finish = threading.Event()
+    wrap_calls = 0
+
+    def fake_wrap_function_wrapper(module: str, name: str, wrapper: object) -> None:
+        del wrapper
+        nonlocal wrap_calls
+        assert module == "langchain_core.callbacks.base"
+        assert name == "BaseCallbackManager.__init__"
+        wrap_started.set()
+        assert allow_wrap_finish.wait(timeout=2)
+        wrap_calls += 1
+
+    monkeypatch.setattr(auto_instrument, "_active_tracer", None)
+    monkeypatch.setattr(
+        auto_instrument, "_ensure_otel_instrumentation_available", lambda: None
+    )
+    monkeypatch.setattr(auto_instrument, "_ensure_wrapt_available", lambda: None)
+    monkeypatch.setattr(
+        auto_instrument, "wrap_function_wrapper", fake_wrap_function_wrapper
+    )
+    monkeypatch.setattr(auto_instrument, "_load_tracer_class", lambda: DummyTracer)
+
+    first_thread = threading.Thread(target=auto_instrument.enable_auto_tracing)
+    second_thread = threading.Thread(target=auto_instrument.enable_auto_tracing)
+
+    first_thread.start()
+    assert wrap_started.wait(timeout=2)
+    second_thread.start()
+    allow_wrap_finish.set()
+    first_thread.join(timeout=2)
+    second_thread.join(timeout=2)
+
+    assert wrap_calls == 1
+    assert auto_instrument.is_auto_tracing_enabled() is True
+    monkeypatch.setattr(auto_instrument, "_active_tracer", None)
+
+
+def test_disable_auto_tracing_uses_matching_unwrap_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyCallbackManager:
+        pass
+
+    captured: dict[str, object] = {}
+
+    def fake_unwrap(module: object, name: str) -> None:
+        captured["module"] = module
+        captured["name"] = name
+
+    monkeypatch.setattr(auto_instrument, "_active_tracer", object())
+    monkeypatch.setattr(
+        auto_instrument, "_ensure_otel_instrumentation_available", lambda: None
+    )
+    monkeypatch.setattr(
+        auto_instrument,
+        "_load_callback_manager_class",
+        lambda: DummyCallbackManager,
+    )
+    monkeypatch.setattr(auto_instrument, "unwrap", fake_unwrap)
+
+    auto_instrument.disable_auto_tracing()
+
+    assert captured == {
+        "module": DummyCallbackManager,
+        "name": "__init__",
+    }
+    assert auto_instrument.is_auto_tracing_enabled() is False

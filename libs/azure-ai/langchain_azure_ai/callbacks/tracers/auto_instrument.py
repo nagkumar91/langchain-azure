@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 from typing import TYPE_CHECKING, Any, Callable
 
 from langchain_azure_ai._api.base import experimental
@@ -62,6 +63,10 @@ _ENV_PROVIDER_NAME = "AZURE_TRACING_PROVIDER_NAME"
 _ENV_AGENT_ID = "AZURE_TRACING_AGENT_ID"
 _ENV_TRACE_ALL_LANGGRAPH_NODES = "AZURE_TRACING_ALL_LANGGRAPH_NODES"
 
+_BASE_CALLBACK_MANAGER_MODULE = "langchain_core.callbacks.base"
+_BASE_CALLBACK_MANAGER_INIT = "BaseCallbackManager.__init__"
+_BASE_CALLBACK_MANAGER_INIT_ATTR = "__init__"
+_AUTO_TRACING_LOCK = threading.Lock()
 _active_tracer: AzureAIOpenTelemetryTracer | None = None
 
 
@@ -70,6 +75,17 @@ class _BaseCallbackManagerInitWrapper:
 
     def __init__(self, tracer: AzureAIOpenTelemetryTracer) -> None:
         self._tracer = tracer
+        self._tracer_type = type(tracer)
+
+    def _has_existing_tracer(self, instance: Any) -> bool:
+        handlers = (
+            *getattr(instance, "handlers", ()),
+            *getattr(instance, "inheritable_handlers", ()),
+        )
+        return any(
+            handler is self._tracer or isinstance(handler, self._tracer_type)
+            for handler in handlers
+        )
 
     def __call__(
         self,
@@ -79,10 +95,7 @@ class _BaseCallbackManagerInitWrapper:
         kwargs: dict[str, Any],
     ) -> Any:
         result = wrapped(*args, **kwargs)
-        for handler in instance.inheritable_handlers:
-            if isinstance(handler, type(self._tracer)):
-                break
-        else:
+        if not self._has_existing_tracer(instance):
             instance.add_handler(self._tracer, True)
         return result
 
@@ -129,6 +142,13 @@ def _load_tracer_class() -> type[AzureAIOpenTelemetryTracer]:
     return AzureAIOpenTelemetryTracer
 
 
+def _load_callback_manager_class() -> type[Any]:
+    """Load the BaseCallbackManager class for precise unpatching."""
+    from langchain_core.callbacks.base import BaseCallbackManager
+
+    return BaseCallbackManager
+
+
 @experimental()
 def enable_auto_tracing(
     *,
@@ -155,60 +175,64 @@ def enable_auto_tracing(
     """
     global _active_tracer
 
-    if _active_tracer is not None:
-        return
+    with _AUTO_TRACING_LOCK:
+        if _active_tracer is not None:
+            return
 
-    _ensure_otel_instrumentation_available()
-    _ensure_wrapt_available()
-    assert wrap_function_wrapper is not None
+        _ensure_otel_instrumentation_available()
+        _ensure_wrapt_available()
+        assert wrap_function_wrapper is not None
 
-    if tracer is None:
-        tracer_class = _load_tracer_class()
-        resolved_connection_string = connection_string or os.getenv(
-            _ENV_CONNECTION_STRING
-        )
-        resolved_enable_content_recording = (
-            enable_content_recording
-            if enable_content_recording is not None
-            else _env_bool(_ENV_ENABLE_CONTENT_RECORDING, True)
-        )
-        resolved_project_endpoint = project_endpoint or os.getenv(_ENV_PROJECT_ENDPOINT)
-        resolved_provider_name = provider_name or os.getenv(_ENV_PROVIDER_NAME)
-        resolved_agent_id = agent_id or os.getenv(_ENV_AGENT_ID)
-        resolved_trace_all_langgraph_nodes = (
-            trace_all_langgraph_nodes
-            if trace_all_langgraph_nodes is not None
-            else _env_bool(_ENV_TRACE_ALL_LANGGRAPH_NODES, False)
-        )
+        if tracer is None:
+            tracer_class = _load_tracer_class()
+            resolved_connection_string = connection_string or os.getenv(
+                _ENV_CONNECTION_STRING
+            )
+            resolved_enable_content_recording = (
+                enable_content_recording
+                if enable_content_recording is not None
+                else _env_bool(_ENV_ENABLE_CONTENT_RECORDING, True)
+            )
+            resolved_project_endpoint = project_endpoint or os.getenv(
+                _ENV_PROJECT_ENDPOINT
+            )
+            resolved_provider_name = provider_name or os.getenv(_ENV_PROVIDER_NAME)
+            resolved_agent_id = agent_id or os.getenv(_ENV_AGENT_ID)
+            resolved_trace_all_langgraph_nodes = (
+                trace_all_langgraph_nodes
+                if trace_all_langgraph_nodes is not None
+                else _env_bool(_ENV_TRACE_ALL_LANGGRAPH_NODES, False)
+            )
 
-        tracer = tracer_class(
-            connection_string=resolved_connection_string,
-            enable_content_recording=resolved_enable_content_recording,
-            project_endpoint=resolved_project_endpoint,
-            credential=credential,
-            provider_name=resolved_provider_name,
-            agent_id=resolved_agent_id,
-            trace_all_langgraph_nodes=resolved_trace_all_langgraph_nodes,
-        )
+            tracer = tracer_class(
+                connection_string=resolved_connection_string,
+                enable_content_recording=resolved_enable_content_recording,
+                project_endpoint=resolved_project_endpoint,
+                credential=credential,
+                provider_name=resolved_provider_name,
+                agent_id=resolved_agent_id,
+                trace_all_langgraph_nodes=resolved_trace_all_langgraph_nodes,
+            )
 
-    wrap_function_wrapper(
-        "langchain_core.callbacks.base",
-        "BaseCallbackManager.__init__",
-        _BaseCallbackManagerInitWrapper(tracer),
-    )
-    _active_tracer = tracer
+        wrap_function_wrapper(
+            _BASE_CALLBACK_MANAGER_MODULE,
+            _BASE_CALLBACK_MANAGER_INIT,
+            _BaseCallbackManagerInitWrapper(tracer),
+        )
+        _active_tracer = tracer
 
 
 def disable_auto_tracing() -> None:
     """Disable callback manager auto-tracing and restore original behavior."""
     global _active_tracer
 
-    if _active_tracer is None:
-        return
+    with _AUTO_TRACING_LOCK:
+        if _active_tracer is None:
+            return
 
-    _ensure_otel_instrumentation_available()
-    unwrap("langchain_core.callbacks.base.BaseCallbackManager", "__init__")
-    _active_tracer = None
+        _ensure_otel_instrumentation_available()
+        unwrap(_load_callback_manager_class(), _BASE_CALLBACK_MANAGER_INIT_ATTR)
+        _active_tracer = None
 
 
 def is_auto_tracing_enabled() -> bool:
