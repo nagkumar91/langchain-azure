@@ -116,13 +116,13 @@ class FoundryEvaluator:
         - Custom user-agent: ``langchain-azure-ai/<version>``
         - W3C traceparent propagation via ``opentelemetry.propagate.inject``
         """
-        if self._project_client is not None and self._openai_client is not None:
-            return self._project_client, self._openai_client
-
-        from azure.ai.projects import AIProjectClient
-        from azure.core.pipeline.policies import UserAgentPolicy
-
         with self._client_lock:
+            if self._project_client is not None and self._openai_client is not None:
+                return self._project_client, self._openai_client
+
+            from azure.ai.projects import AIProjectClient
+            from azure.core.pipeline.policies import UserAgentPolicy
+
             if self._project_client is None or self._openai_client is None:
                 user_agent_policy = UserAgentPolicy(
                     user_agent=_USER_AGENT,
@@ -137,7 +137,7 @@ class FoundryEvaluator:
                 # and will carry the user-agent through Azure pipeline policies.
                 self._openai_client = project_client.get_openai_client()
 
-        return self._project_client, self._openai_client
+            return self._project_client, self._openai_client
 
     def close(self) -> None:
         """Close cached project resources."""

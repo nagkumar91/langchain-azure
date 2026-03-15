@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -284,6 +284,35 @@ class TestFoundryEvaluator:
         assert project_client_1 is project_client_2 is mock_project_client
         assert client_1 is client_2 is mock_openai_client
         mock_project_client.get_openai_client.assert_called_once()
+
+    def test_get_client_locks_when_returning_cached_clients(self) -> None:
+        from langchain_azure_ai.evaluation.foundry import FoundryEvaluator
+
+        class CountingLock:
+            def __init__(self) -> None:
+                self._lock = threading.Lock()
+                self.enter_count = 0
+
+            def __enter__(self) -> CountingLock:
+                self.enter_count += 1
+                self._lock.acquire()
+                return self
+
+            def __exit__(self, *args: object) -> Literal[False]:
+                self._lock.release()
+                return False
+
+        evaluator = FoundryEvaluator.__new__(FoundryEvaluator)
+        evaluator._project_client = object()
+        evaluator._openai_client = object()
+        counting_lock = CountingLock()
+        evaluator._client_lock = cast(Any, counting_lock)
+
+        project_client, openai_client = evaluator._get_client()
+
+        assert counting_lock.enter_count == 1
+        assert project_client is evaluator._project_client
+        assert openai_client is evaluator._openai_client
 
     def test_evaluate_times_out_with_failed_result(self) -> None:
         from langchain_azure_ai.evaluation.foundry import FoundryEvaluator
