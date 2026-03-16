@@ -414,6 +414,19 @@ class TestFoundryEvaluatorSuite:
         suite.evaluate_all(query="q", response="r")
         assert suite.all_passed is True
 
+    def test_close_closes_all_evaluators(self) -> None:
+        from langchain_azure_ai.evaluation.foundry import FoundryEvaluatorSuite
+
+        evaluator_1 = MagicMock()
+        evaluator_2 = MagicMock()
+
+        suite = FoundryEvaluatorSuite([evaluator_1, evaluator_2])
+
+        suite.close()
+
+        evaluator_1.close.assert_called_once_with()
+        evaluator_2.close.assert_called_once_with()
+
 
 # ============================================================
 # Tests for tracer emit_evaluation_event

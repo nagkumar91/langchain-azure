@@ -112,9 +112,8 @@ class FoundryEvaluator:
     def _get_client(self) -> tuple[Any, Any]:
         """Create or reuse the AIProjectClient and OpenAI client.
 
-        Configures the client with:
-        - Custom user-agent: ``langchain-azure-ai/<version>``
-        - W3C traceparent propagation via ``opentelemetry.propagate.inject``
+        Configures the project client with a custom user-agent:
+        - ``langchain-azure-ai/<version>``
         """
         with self._client_lock:
             if self._project_client is not None and self._openai_client is not None:
@@ -123,19 +122,18 @@ class FoundryEvaluator:
             from azure.ai.projects import AIProjectClient
             from azure.core.pipeline.policies import UserAgentPolicy
 
-            if self._project_client is None or self._openai_client is None:
-                user_agent_policy = UserAgentPolicy(
-                    user_agent=_USER_AGENT,
-                )
-                project_client = AIProjectClient(
-                    endpoint=self._project_endpoint,
-                    credential=self._credential,
-                    per_call_policies=[user_agent_policy],
-                )
-                self._project_client = project_client
-                # The OpenAI client inherits the project client's transport
-                # and will carry the user-agent through Azure pipeline policies.
-                self._openai_client = project_client.get_openai_client()
+            user_agent_policy = UserAgentPolicy(
+                user_agent=_USER_AGENT,
+            )
+            project_client = AIProjectClient(
+                endpoint=self._project_endpoint,
+                credential=self._credential,
+                per_call_policies=[user_agent_policy],
+            )
+            self._project_client = project_client
+            # The OpenAI client inherits the project client's transport
+            # and will carry the user-agent through Azure pipeline policies.
+            self._openai_client = project_client.get_openai_client()
 
             return self._project_client, self._openai_client
 
@@ -440,6 +438,11 @@ class FoundryEvaluatorSuite:
         """Initialize the evaluator suite."""
         self._evaluators = list(evaluators)
         self._last_results: list[FoundryEvalResult] = []
+
+    def close(self) -> None:
+        """Close cached resources for all evaluators in the suite."""
+        for evaluator in self._evaluators:
+            evaluator.close()
 
     def evaluate_all(
         self,
