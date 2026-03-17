@@ -1681,6 +1681,23 @@ tools = ["azure-ai-documentintelligence (>=1.0.2,<2.0.0)", "azure-ai-textanalyti
 v1 = ["azure-ai-agents (==1.2.0b5)", "azure-ai-inference[opentelemetry] (>=1.0.0b9,<2.0)"]
 
 [[package]]
+name = "langchain-azure-dynamic-sessions"
+version = "0.3.1"
+description = "An integration package connecting Azure Container Apps dynamic sessions and LangChain"
+optional = false
+python-versions = "<4.0,>=3.10"
+groups = ["main"]
+files = [
+    {file = "langchain_azure_dynamic_sessions-0.3.1-py3-none-any.whl", hash = "sha256:034bb46d71169d58cfa1c44da4eb2432915994fc3142912477a3dfd20e7c7529"},
+    {file = "langchain_azure_dynamic_sessions-0.3.1.tar.gz", hash = "sha256:be3dc5b0bbe50319b017af79d52e9e35932fd8c8567d3aa98569261af8399233"},
+]
+
+[package.dependencies]
+azure-identity = ">=1.16,<2.0"
+langchain-core = ">=1.0.1"
+requests = ">=2.31,<3.0"
+
+[[package]]
 name = "langchain-core"
 version = "1.2.19"
 description = "Building applications with LLMs through composability"
@@ -3454,7 +3471,7 @@ version = "2.12.0"
 description = "JSON Web Token implementation in Python"
 optional = false
 python-versions = ">=3.9"
-groups = ["main", "dev"]
+groups = ["main"]
 files = [
     {file = "pyjwt-2.12.0-py3-none-any.whl", hash = "sha256:9bb459d1bdd0387967d287f5656bf7ec2b9a26645d1961628cda1764e087fd6e"},
     {file = "pyjwt-2.12.0.tar.gz", hash = "sha256:2f62390b667cd8257de560b850bb5a883102a388829274147f1d724453f8fb02"},
@@ -4889,4 +4906,4 @@ cffi = ["cffi (>=1.17,<2.0) ; platform_python_implementation != \"PyPy\" and pyt
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.10.0,<4.0"
-content-hash = "246d48bc6673c7deb8933f02c7c6384cfdc84bf1d1f616cb9d0e0e2957c7540f"
+content-hash = "50e9946c0a5e8b69d8d68da5fc3884b5100700f8a23900fd20c235ba79d526da"
