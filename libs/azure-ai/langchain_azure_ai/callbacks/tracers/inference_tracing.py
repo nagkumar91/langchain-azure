@@ -1111,11 +1111,17 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         trace_all_langgraph_nodes: bool = False,
         ignore_start_node: bool = True,
         compat_create_agent_filtering: bool = True,
+        auto_configure_azure_monitor: bool = True,
         _prepare_messages_fn: Optional[
             Callable[..., tuple[Optional[str], Optional[str]]]
         ] = None,
     ) -> None:
-        """Initialize tracer state and configure Azure Monitor if needed."""
+        """Initialize tracer state and configure Azure Monitor if needed.
+
+        Set *auto_configure_azure_monitor* to ``False`` when your application
+        already configures Azure Monitor (or any other ``TracerProvider``) to
+        avoid duplicate telemetry export.
+        """
         super().__init__()
         if _prepare_messages_fn is not None:
             expected_params = {"raw_messages", "record_content", "include_roles"}
@@ -1134,22 +1140,25 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         self._default_agent_id = agent_id
         self._default_provider_name = provider_name
         self._content_recording = enable_content_recording
-        self._tracer = otel_trace.get_tracer(name, schema_url=self._schema_url)
         self._message_keys = tuple(message_keys)
         self._message_paths = tuple(message_paths)
         self._trace_all_langgraph_nodes = trace_all_langgraph_nodes
         self._ignore_start_node = ignore_start_node
         self._compat_create_agent_filtering = compat_create_agent_filtering
 
-        if connection_string is None:
-            connection_string = _resolve_connection_from_project(
-                project_endpoint, credential
-            )
-        if connection_string is None:
-            connection_string = os.getenv("APPLICATION_INSIGHTS_CONNECTION_STRING")
+        if auto_configure_azure_monitor:
+            if connection_string is None:
+                connection_string = _resolve_connection_from_project(
+                    project_endpoint, credential
+                )
+            if connection_string is None:
+                connection_string = os.getenv("APPLICATION_INSIGHTS_CONNECTION_STRING")
 
-        if connection_string:
-            self._configure_azure_monitor(connection_string)
+            if connection_string:
+                self._configure_azure_monitor(connection_string)
+
+        # Obtain tracer *after* configure so it uses the real provider.
+        self._tracer = otel_trace.get_tracer(name, schema_url=self._schema_url)
 
         self._spans: Dict[str, _SpanRecord] = {}
         self._lock = Lock()
@@ -2510,14 +2519,40 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         with cls._configure_lock:
             if cls._azure_monitor_configured:
                 return
+
+            # If a real TracerProvider is already set (e.g. by the user or
+            # by an auto-instrumentation agent), calling
+            # configure_azure_monitor() would create an orphaned provider
+            # whose side-effects (instrumentors, live-metrics callbacks)
+            # can cause duplicate span exports.  Skip in that case.
+            current_provider = otel_trace.get_tracer_provider()
+            if not isinstance(current_provider, otel_trace.ProxyTracerProvider):
+                LOGGER.info(
+                    "A TracerProvider is already configured (%s). "
+                    "Skipping configure_azure_monitor() to avoid duplicate "
+                    "telemetry export. The AzureAIOpenTelemetryTracer will "
+                    "emit spans via the existing provider.",
+                    type(current_provider).__name__,
+                )
+                cls._azure_monitor_configured = True
+                return
+
             # Set OTEL_TRACES_SAMPLER before configure_azure_monitor() so
             # the distro does not install its default RateLimitedSampler,
             # which silently drops user-provided span attributes when
             # sampling_percentage == 100%.  ``always_on`` delegates to the
             # standard ALWAYS_ON sampler that preserves attributes.
             os.environ.setdefault("OTEL_TRACES_SAMPLER", "always_on")
+
+            # Disable HTTP auto-instrumentors that would create redundant
+            # spans alongside the tracer's own GenAI spans.
             configure_azure_monitor(
                 connection_string=connection_string,
                 sampling_ratio=1.0,
+                instrumentation_options={
+                    "requests": {"enabled": False},
+                    "urllib": {"enabled": False},
+                    "urllib3": {"enabled": False},
+                },
             )
             cls._azure_monitor_configured = True
