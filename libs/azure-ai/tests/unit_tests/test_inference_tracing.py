@@ -120,8 +120,9 @@ def reset_global_tracer_provider(monkeypatch: pytest.MonkeyPatch) -> None:
 
     This touches private OTel internals because the public API
     (``set_tracer_provider``) is intentionally write-once.  The attributes
-    are guarded with ``getattr`` so the fixture raises a clear error if a
-    future OTel release renames them rather than silently misbehaving.
+    are guarded with ``hasattr``/``getattr`` so the fixture cleanly skips
+    tests if a future OTel release renames them rather than silently
+    misbehaving.
     """
     for attr in ("_TRACER_PROVIDER", "_PROXY_TRACER_PROVIDER"):
         if not hasattr(otel_trace, attr):
