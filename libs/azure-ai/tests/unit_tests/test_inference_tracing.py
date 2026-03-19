@@ -7,31 +7,34 @@ from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
-from langchain_core.agents import AgentAction
-from langchain_core.documents import Document
-from langchain_core.messages import (
+
+# Skip tests cleanly if required deps are not present.
+# These guards must come *before* the optional imports below so that
+# test collection skips gracefully when the packages are absent.
+pytest.importorskip("azure.monitor.opentelemetry")
+pytest.importorskip("opentelemetry")
+pytest.importorskip("langchain_core")
+
+from langchain_core.agents import AgentAction  # noqa: E402
+from langchain_core.documents import Document  # noqa: E402
+from langchain_core.messages import (  # noqa: E402
     AIMessage,
     BaseMessage,
     HumanMessage,
     SystemMessage,
     ToolMessage,
 )
-from langchain_core.outputs import ChatGeneration, LLMResult
-from opentelemetry import trace as otel_trace
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+from langchain_core.outputs import ChatGeneration, LLMResult  # noqa: E402
+from opentelemetry import trace as otel_trace  # noqa: E402
+from opentelemetry.sdk.resources import Resource  # noqa: E402
+from opentelemetry.sdk.trace import TracerProvider  # noqa: E402
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor  # noqa: E402
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import (  # noqa: E402
     InMemorySpanExporter,
 )
-from opentelemetry.trace.status import StatusCode
+from opentelemetry.trace.status import StatusCode  # noqa: E402
 
-import langchain_azure_ai.callbacks.tracers.inference_tracing as tracing
-
-# Skip tests cleanly if required deps are not present
-pytest.importorskip("azure.monitor.opentelemetry")
-pytest.importorskip("opentelemetry")
-pytest.importorskip("langchain_core")
+import langchain_azure_ai.callbacks.tracers.inference_tracing as tracing  # noqa: E402
 
 
 class MockSpan:
@@ -113,14 +116,30 @@ def patch_otel(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 @pytest.fixture
 def reset_global_tracer_provider(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Reset the real OTel global state and point the tracing module at it."""
+    """Reset the real OTel global state and point the tracing module at it.
+
+    This touches private OTel internals because the public API
+    (``set_tracer_provider``) is intentionally write-once.  The attributes
+    are guarded with ``getattr`` so the fixture raises a clear error if a
+    future OTel release renames them rather than silently misbehaving.
+    """
+    for attr in ("_TRACER_PROVIDER", "_PROXY_TRACER_PROVIDER"):
+        if not hasattr(otel_trace, attr):
+            pytest.skip(
+                f"opentelemetry.trace.{attr} not found — "
+                f"OTel internals may have changed"
+            )
+    once = getattr(otel_trace, "_TRACER_PROVIDER_SET_ONCE", None)
+    if once is None or not hasattr(once, "_done"):
+        pytest.skip("opentelemetry.trace._TRACER_PROVIDER_SET_ONCE layout changed")
+
     monkeypatch.setattr(otel_trace, "_TRACER_PROVIDER", None)
     monkeypatch.setattr(
         otel_trace,
         "_PROXY_TRACER_PROVIDER",
         otel_trace.ProxyTracerProvider(),
     )
-    monkeypatch.setattr(otel_trace._TRACER_PROVIDER_SET_ONCE, "_done", False)
+    monkeypatch.setattr(once, "_done", False)
     monkeypatch.setattr(tracing, "otel_trace", otel_trace)
 
 
