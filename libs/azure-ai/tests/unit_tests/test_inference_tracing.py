@@ -1,7 +1,9 @@
 import json
+import logging
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Any, Dict, List, Mapping, Optional, Tuple, cast
+from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple, cast
+from unittest.mock import patch
 from uuid import uuid4
 
 import pytest
@@ -15,6 +17,13 @@ from langchain_core.messages import (
     ToolMessage,
 )
 from langchain_core.outputs import ChatGeneration, LLMResult
+from opentelemetry import trace as otel_trace
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+    InMemorySpanExporter,
+)
 from opentelemetry.trace.status import StatusCode
 
 import langchain_azure_ai.callbacks.tracers.inference_tracing as tracing
@@ -82,12 +91,37 @@ class MockTracer:
         return span
 
 
+class _MockProxyTracerProvider:
+    """Fake proxy provider used by the autouse fixture."""
+
+
 @pytest.fixture(autouse=True)
-def patch_otel(monkeypatch: pytest.MonkeyPatch) -> None:
-    mock = SimpleNamespace(get_tracer=lambda *_, **__: MockTracer())
+def patch_otel(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    original = tracing.AzureAIOpenTelemetryTracer._azure_monitor_configured
+    tracing.AzureAIOpenTelemetryTracer._azure_monitor_configured = False
+    mock = SimpleNamespace(
+        get_tracer=lambda *_, **__: MockTracer(),
+        get_tracer_provider=lambda: _MockProxyTracerProvider(),
+        ProxyTracerProvider=_MockProxyTracerProvider,
+    )
     monkeypatch.setattr(tracing, "otel_trace", mock)
     monkeypatch.setattr(tracing, "set_span_in_context", lambda span: None)
     monkeypatch.setattr(tracing, "get_current_span", lambda: None)
+    yield
+    tracing.AzureAIOpenTelemetryTracer._azure_monitor_configured = original
+
+
+@pytest.fixture
+def reset_global_tracer_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reset the real OTel global state and point the tracing module at it."""
+    monkeypatch.setattr(otel_trace, "_TRACER_PROVIDER", None)
+    monkeypatch.setattr(
+        otel_trace,
+        "_PROXY_TRACER_PROVIDER",
+        otel_trace.ProxyTracerProvider(),
+    )
+    monkeypatch.setattr(otel_trace._TRACER_PROVIDER_SET_ONCE, "_done", False)
+    monkeypatch.setattr(tracing, "otel_trace", otel_trace)
 
 
 def get_last_span_for(
@@ -1779,21 +1813,85 @@ def test_use_propagated_context_no_headers_is_noop(
         pass
 
 
-def test_configure_azure_monitor_is_singleton(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls: list[str] = []
+def test_configure_azure_monitor_respects_existing_tracer_provider(
+    caplog: pytest.LogCaptureFixture,
+    reset_global_tracer_provider: None,
+) -> None:
+    """configure_azure_monitor() should be skipped when a real TracerProvider
+    (not ProxyTracerProvider) is already set, to avoid duplicate exports."""
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider(
+        resource=Resource.create({"service.name": "existing-provider"})
+    )
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    otel_trace.set_tracer_provider(provider)
 
-    def fake_configure(*, connection_string: str, **kwargs: Any) -> None:
-        calls.append(connection_string)
+    with patch.object(tracing, "configure_azure_monitor") as mock_configure:
+        with caplog.at_level(logging.INFO, logger=tracing.LOGGER.name):
+            tracer = tracing.AzureAIOpenTelemetryTracer(connection_string="cs")
 
-    original = tracing.AzureAIOpenTelemetryTracer._azure_monitor_configured
-    monkeypatch.setattr(tracing, "configure_azure_monitor", fake_configure)
-    try:
-        tracing.AzureAIOpenTelemetryTracer._azure_monitor_configured = False
-        tracing.AzureAIOpenTelemetryTracer._configure_azure_monitor("cs1")
-        tracing.AzureAIOpenTelemetryTracer._configure_azure_monitor("cs2")
-        assert calls == ["cs1"]
-    finally:
-        tracing.AzureAIOpenTelemetryTracer._azure_monitor_configured = original
+    mock_configure.assert_not_called()
+    assert "TracerProvider is already configured" in caplog.text
+
+    # Verify the tracer emits spans through the pre-existing provider
+    span = tracer._tracer.start_span("existing-provider-span")
+    span.end()
+    spans = exporter.get_finished_spans()
+    assert [s.name for s in spans] == ["existing-provider-span"]
+    assert spans[0].resource.attributes["service.name"] == "existing-provider"
+
+
+def test_configure_azure_monitor_runs_for_proxy_tracer_provider(
+    reset_global_tracer_provider: None,
+) -> None:
+    """configure_azure_monitor() should be called when no real provider is set."""
+    with patch.object(tracing, "configure_azure_monitor") as mock_configure:
+        tracing.AzureAIOpenTelemetryTracer(connection_string="cs")
+
+    mock_configure.assert_called_once()
+    call_kwargs = mock_configure.call_args[1]
+    assert call_kwargs["connection_string"] == "cs"
+
+
+def test_configure_azure_monitor_is_singleton(
+    reset_global_tracer_provider: None,
+) -> None:
+    """configure_azure_monitor() should be called at most once across
+    multiple AzureAIOpenTelemetryTracer instances."""
+    with patch.object(tracing, "configure_azure_monitor") as mock_configure:
+        tracing.AzureAIOpenTelemetryTracer(connection_string="cs1")
+        tracing.AzureAIOpenTelemetryTracer(connection_string="cs2")
+
+    mock_configure.assert_called_once()
+    assert mock_configure.call_args[1]["connection_string"] == "cs1"
+
+
+def test_auto_configure_azure_monitor_false_skips_setup(
+    reset_global_tracer_provider: None,
+) -> None:
+    """When auto_configure_azure_monitor=False, no Azure Monitor setup occurs."""
+    with patch.object(tracing, "configure_azure_monitor") as mock_configure:
+        tracer = tracing.AzureAIOpenTelemetryTracer(
+            connection_string="InstrumentationKey=fake",
+            auto_configure_azure_monitor=False,
+        )
+
+    mock_configure.assert_not_called()
+    assert tracer._tracer is not None
+
+
+def test_configure_disables_http_instrumentors(
+    reset_global_tracer_provider: None,
+) -> None:
+    """configure_azure_monitor() should disable HTTP auto-instrumentors."""
+    with patch.object(tracing, "configure_azure_monitor") as mock_configure:
+        tracing.AzureAIOpenTelemetryTracer(connection_string="cs1")
+
+    mock_configure.assert_called_once()
+    opts = mock_configure.call_args[1].get("instrumentation_options", {})
+    assert opts.get("requests", {}).get("enabled") is False
+    assert opts.get("urllib", {}).get("enabled") is False
+    assert opts.get("urllib3", {}).get("enabled") is False
 
 
 def test_callbacks_handle_missing_records_and_input_str_branch() -> None:
