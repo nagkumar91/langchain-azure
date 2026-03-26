@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Literal, Optional, Sequence
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, List, Literal, Optional, Sequence
 
 from langchain.agents.middleware import AgentState, Runtime
 from langchain_core.messages import BaseMessage, ToolMessage
@@ -13,9 +14,34 @@ from langchain_azure_ai._api.base import experimental
 from langchain_azure_ai.agents.middleware.content_safety._base import (
     ContentSafetyAnnotationPayload,
     ContentSafetyEvaluation,
-    PromptInjectionEvaluation,
     _AzureContentSafetyBaseMiddleware,
 )
+
+
+@dataclass(frozen=True)
+class PromptInjectionEvaluation(ContentSafetyEvaluation):
+    """A prompt-injection evaluation."""
+
+    source: str = ""
+    detected: bool = True
+
+
+@dataclass
+class PromptShieldInput:
+    """Input extracted from an agent state for prompt shield evaluation.
+
+    This is the return type for a ``context_extractor`` callable passed to
+    :class:`~langchain_azure_ai.agents.middleware.content_safety.AzurePromptShieldMiddleware`.
+
+    Attributes:
+        user_prompt: The user's input text to evaluate for direct prompt injection.
+        documents: External document texts (e.g. tool / function-call results)
+            to evaluate for indirect prompt injection.  Defaults to an empty list.
+    """
+
+    user_prompt: str
+    documents: List[str] = field(default_factory=list)
+
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +105,13 @@ class AzurePromptShieldMiddleware(_AzureContentSafetyBaseMiddleware):
             ``AIMessage``).  Defaults to ``False``.
         name: Node-name prefix used when wiring this middleware into a
             LangGraph.  Defaults to ``"azure_prompt_shield"``.
+        context_extractor: Optional callable with signature
+            ``(state, runtime) -> Optional[PromptShieldInput]``
+            that receives the current graph state and the LangGraph
+            :class:`~langchain.agents.middleware.Runtime` execution context,
+            and returns the user prompt and documents to screen, or ``None``
+            to skip evaluation entirely.  When ``None`` (default) the
+            middleware uses its built-in extraction logic.
     """
 
     def __init__(
@@ -92,6 +125,9 @@ class AzurePromptShieldMiddleware(_AzureContentSafetyBaseMiddleware):
         apply_to_input: bool = True,
         apply_to_output: bool = False,
         name: str = "azure_prompt_shield",
+        context_extractor: Optional[
+            Callable[[AgentState[Any], Runtime[Any]], Optional[PromptShieldInput]]
+        ] = None,
     ) -> None:
         """Initialise the prompt shield middleware.
 
@@ -106,6 +142,9 @@ class AzurePromptShieldMiddleware(_AzureContentSafetyBaseMiddleware):
             apply_to_input: Screen the last HumanMessage before agent runs.
             apply_to_output: Screen the last AIMessage after agent runs.
             name: Node-name prefix for LangGraph wiring.
+            context_extractor: Optional callable that extracts the user prompt
+                and documents to screen from the agent state and the LangGraph
+                execution context instead of using the built-in heuristics.
         """
         super().__init__(
             endpoint=endpoint,
@@ -117,6 +156,7 @@ class AzurePromptShieldMiddleware(_AzureContentSafetyBaseMiddleware):
             apply_to_output=apply_to_output,
             name=name,
         )
+        self._context_extractor = context_extractor
 
     # ------------------------------------------------------------------
     # Annotation / violation helpers
@@ -163,6 +203,38 @@ class AzurePromptShieldMiddleware(_AzureContentSafetyBaseMiddleware):
         return evaluations
 
     # ------------------------------------------------------------------
+    # Input extraction
+    # ------------------------------------------------------------------
+
+    def _extract_prompt_shield_inputs(
+        self, state: AgentState[Any], runtime: Runtime[Any]
+    ) -> Optional[PromptShieldInput]:
+        """Extract the user prompt and documents from the agent state.
+
+        When a ``context_extractor`` was provided at construction time it is
+        called with the current state and the LangGraph execution context.
+        Otherwise the default heuristics are used: the last ``HumanMessage``
+        as the user prompt and any ``ToolMessage`` items as documents.
+
+        Args:
+            state: Current LangGraph state dict.
+            runtime: The LangGraph execution context.
+
+        Returns:
+            A :class:`PromptShieldInput` instance, or ``None`` when no
+            user-prompt text can be found.
+        """
+        if self._context_extractor is not None:
+            return self._context_extractor(state, runtime)
+
+        offending = self.get_human_message_from_state(state)
+        user_prompt = self.get_text_from_message(offending)
+        if not user_prompt:
+            return None
+        documents = self._extract_tool_texts(state.get("messages", []))
+        return PromptShieldInput(user_prompt=user_prompt, documents=documents)
+
+    # ------------------------------------------------------------------
     # Synchronous hooks
     # ------------------------------------------------------------------
 
@@ -172,19 +244,20 @@ class AzurePromptShieldMiddleware(_AzureContentSafetyBaseMiddleware):
         """Screen the last HumanMessage for prompt injection before the agent runs."""
         if not self.apply_to_input:
             return None
-        offending = self.get_human_message_from_state(state)
-        user_prompt = self.get_text_from_message(offending)
-        if not user_prompt:
+        inputs = self._extract_prompt_shield_inputs(state, runtime)
+        if inputs is None:
             logger.debug("[%s] before_agent: no HumanMessage text found", self.name)
             return None
-        documents = self._extract_tool_texts(state.get("messages", []))
         logger.debug(
             "[%s] before_agent: shielding input (%d chars, %d documents)",
             self.name,
-            len(user_prompt),
-            len(documents),
+            len(inputs.user_prompt),
+            len(inputs.documents),
         )
-        violations = self._shield_sync(user_prompt=user_prompt, documents=documents)
+        offending = self.get_human_message_from_state(state)
+        violations = self._shield_sync(
+            user_prompt=inputs.user_prompt, documents=inputs.documents
+        )
         return self._handle_violations(violations, "agent.input", offending)
 
     # ------------------------------------------------------------------
@@ -197,20 +270,19 @@ class AzurePromptShieldMiddleware(_AzureContentSafetyBaseMiddleware):
         """Async version of :meth:`before_agent`."""
         if not self.apply_to_input:
             return None
-        offending = self.get_human_message_from_state(state)
-        user_prompt = self.get_text_from_message(offending)
-        if not user_prompt:
+        inputs = self._extract_prompt_shield_inputs(state, runtime)
+        if inputs is None:
             logger.debug("[%s] abefore_agent: no HumanMessage text found", self.name)
             return None
-        documents = self._extract_tool_texts(state.get("messages", []))
         logger.debug(
             "[%s] abefore_agent: shielding input (%d chars, %d documents)",
             self.name,
-            len(user_prompt),
-            len(documents),
+            len(inputs.user_prompt),
+            len(inputs.documents),
         )
+        offending = self.get_human_message_from_state(state)
         violations = await self._shield_async(
-            user_prompt=user_prompt, documents=documents
+            user_prompt=inputs.user_prompt, documents=inputs.documents
         )
         return self._handle_violations(violations, "agent.input", offending)
 

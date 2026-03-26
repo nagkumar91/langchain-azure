@@ -69,58 +69,6 @@ class ContentModerationEvaluation(ContentSafetyEvaluation):
     severity: int = 0
 
 
-@dataclass(frozen=True)
-class BlocklistEvaluation(ContentSafetyEvaluation):
-    """A blocklist-match evaluation from text content analysis."""
-
-    blocklist_name: str = ""
-    text: str = ""
-
-
-@dataclass(frozen=True)
-class ProtectedMaterialEvaluation(ContentSafetyEvaluation):
-    """A protected-material evaluation."""
-
-    detected: bool = True
-    code_citations: List[Dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
-class PromptInjectionEvaluation(ContentSafetyEvaluation):
-    """A prompt-injection evaluation."""
-
-    source: str = ""
-    detected: bool = True
-
-
-@dataclass(frozen=True)
-class GroundednessEvaluation(ContentSafetyEvaluation):
-    """A groundedness evaluation."""
-
-    category: Literal["Groundedness"] = "Groundedness"
-    is_grounded: bool = True
-    ungrounded_percentage: float = 0.0
-    details: List[Dict[str, Any]] = field(default_factory=list)
-
-
-@dataclass
-class GroundednessInput:
-    """Inputs extracted from an agent state for groundedness evaluation.
-
-    This is the return type for a ``context_extractor`` callable passed to
-    :class:`~langchain_azure_ai.agents.middleware.content_safety.AzureGroundednessMiddleware`.
-
-    Attributes:
-        answer: The generated model answer to evaluate.
-        sources: Grounding source texts to evaluate the answer against.
-        question: The user question (only used when ``task="QnA"``).
-    """
-
-    answer: str
-    sources: List[str]
-    question: Optional[str] = None
-
-
 # ---------------------------------------------------------------------------
 # Annotation payload
 # ---------------------------------------------------------------------------
@@ -148,12 +96,6 @@ class _ContentSafetyState(MessagesState, total=False):
     """Extended state that carries content-safety violation results."""
 
     content_safety_violations: List[Dict[str, Any]]
-
-
-class _GroundednessState(MessagesState, total=False):
-    """Extended state that carries groundedness evaluation annotations."""
-
-    groundedness_evaluation: Dict[str, Any]
 
 
 logger = logging.getLogger(__name__)
@@ -645,7 +587,7 @@ def print_content_safety_annotations(msg: BaseMessage) -> None:
                 bl = v.get("blocklist_name")
                 if bl:
                     print(f"  Blocklist        : {bl}")
-                    print(f"  Matched text     : \"{v.get('text', '')}\"")
+                    print(f'  Matched text     : "{v.get("text", "")}"')
 
             elif dt == "protected_material":
                 detected = v.get("detected", False)

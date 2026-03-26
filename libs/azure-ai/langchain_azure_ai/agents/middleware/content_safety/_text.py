@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, List, Literal, Optional, Sequence
+from dataclasses import dataclass
+from typing import Any, Callable, List, Literal, Optional, Sequence
 
 from azure.ai.contentsafety.models import AnalyzeTextOptions, TextCategory
 from langchain.agents.middleware import AgentState, Runtime
@@ -11,12 +12,36 @@ from langchain_core.messages.content import NonStandardAnnotation
 
 from langchain_azure_ai._api.base import experimental
 from langchain_azure_ai.agents.middleware.content_safety._base import (
-    BlocklistEvaluation,
     ContentModerationEvaluation,
     ContentSafetyAnnotationPayload,
     ContentSafetyEvaluation,
     _AzureContentSafetyBaseMiddleware,
 )
+
+
+@dataclass(frozen=True)
+class BlocklistEvaluation(ContentSafetyEvaluation):
+    """A blocklist-match evaluation from text content analysis."""
+
+    blocklist_name: str = ""
+    text: str = ""
+
+
+@dataclass
+class TextModerationInput:
+    """Input extracted from an agent state for text content moderation.
+
+    This is the return type for a ``context_extractor`` callable passed to
+    :class:`~langchain_azure_ai.agents.middleware.content_safety.AzureContentModerationMiddleware`
+    or
+    :class:`~langchain_azure_ai.agents.middleware.content_safety.AzureProtectedMaterialMiddleware`.
+
+    Attributes:
+        text: The text content to submit to the Azure Content Safety service.
+    """
+
+    text: str
+
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +110,25 @@ class AzureContentModerationMiddleware(_AzureContentSafetyBaseMiddleware):
     Both synchronous (``before_agent`` / ``after_agent``) and asynchronous
     (``abefore_agent`` / ``aafter_agent``) hooks are implemented.
 
+    By default the middleware extracts the last ``HumanMessage`` (input) or
+    ``AIMessage`` (output) and submits its text to the service.  You can
+    override this behaviour by supplying a ``context_extractor`` callable::
+
+        from langchain_azure_ai.agents.middleware import (
+            AzureContentModerationMiddleware,
+            TextModerationInput,
+        )
+
+        def my_extractor(state, runtime):
+            # Return None to skip moderation for this call
+            messages = state.get("messages", [])
+            text = " ".join(m.content for m in messages if hasattr(m, "content"))
+            return TextModerationInput(text=text) if text else None
+
+        middleware = AzureContentModerationMiddleware(
+            context_extractor=my_extractor,
+        )
+
     Args:
         endpoint: Azure Content Safety resource endpoint URL.  Falls back to
             the ``AZURE_CONTENT_SAFETY_ENDPOINT`` environment variable.
@@ -117,6 +161,13 @@ class AzureContentModerationMiddleware(_AzureContentSafetyBaseMiddleware):
             the built-in harm classifiers.
         name: Node-name prefix used when wiring this middleware into a
             LangGraph.  Defaults to ``"azure_content_safety"``.
+        context_extractor: Optional callable with signature
+            ``(state, runtime) -> Optional[TextModerationInput]``
+            that receives the current graph state and the LangGraph
+            :class:`~langchain.agents.middleware.Runtime` execution context,
+            and returns the text to screen, or ``None`` to skip evaluation
+            entirely.  When ``None`` (default) the middleware uses its
+            built-in extraction logic.
     """
 
     def __init__(
@@ -135,6 +186,9 @@ class AzureContentModerationMiddleware(_AzureContentSafetyBaseMiddleware):
         apply_to_output: bool = True,
         blocklist_names: Optional[List[str]] = None,
         name: str = "azure_content_safety",
+        context_extractor: Optional[
+            Callable[[AgentState[Any], Runtime[Any]], Optional[TextModerationInput]]
+        ] = None,
     ) -> None:
         """Initialise the text content moderation middleware.
 
@@ -152,6 +206,9 @@ class AzureContentModerationMiddleware(_AzureContentSafetyBaseMiddleware):
             apply_to_output: Screen the last AIMessage after agent runs.
             blocklist_names: Custom blocklist names in your resource.
             name: Node-name prefix for LangGraph wiring.
+            context_extractor: Optional callable that extracts the text to
+                screen from the agent state and the LangGraph execution context
+                instead of using the built-in heuristics.
         """
         super().__init__(
             endpoint=endpoint,
@@ -175,6 +232,7 @@ class AzureContentModerationMiddleware(_AzureContentSafetyBaseMiddleware):
             ]
         )
         self._blocklist_names: List[str] = blocklist_names or []
+        self._context_extractor = context_extractor
 
     # ------------------------------------------------------------------
     # Annotation / violation helpers
@@ -219,6 +277,42 @@ class AzureContentModerationMiddleware(_AzureContentSafetyBaseMiddleware):
         return evaluations
 
     # ------------------------------------------------------------------
+    # Input extraction
+    # ------------------------------------------------------------------
+
+    def _extract_text_input(
+        self, state: AgentState[Any], runtime: Runtime[Any], *, is_input: bool
+    ) -> Optional[TextModerationInput]:
+        """Extract the text to screen from the agent state.
+
+        When a ``context_extractor`` was provided at construction time it is
+        called with the current state and the LangGraph execution context.
+        Otherwise the default heuristics are used: the last ``HumanMessage``
+        text for input screening and the last ``AIMessage`` text for output
+        screening.
+
+        Args:
+            state: Current LangGraph state dict.
+            runtime: The LangGraph execution context.
+            is_input: ``True`` when screening agent input (``before_agent``),
+                ``False`` when screening agent output (``after_agent``).
+
+        Returns:
+            A :class:`TextModerationInput` instance, or ``None`` to skip
+            evaluation.
+        """
+        if self._context_extractor is not None:
+            return self._context_extractor(state, runtime)
+
+        msg = (
+            self.get_human_message_from_state(state)
+            if is_input
+            else self.get_ai_message_from_state(state)
+        )
+        text = self.get_text_from_message(msg)
+        return TextModerationInput(text=text) if text else None
+
+    # ------------------------------------------------------------------
     # Synchronous hooks
     # ------------------------------------------------------------------
 
@@ -228,15 +322,17 @@ class AzureContentModerationMiddleware(_AzureContentSafetyBaseMiddleware):
         """Screen the last HumanMessage before the agent runs."""
         if not self.apply_to_input:
             return None
-        offending = self.get_human_message_from_state(state)
-        text = self.get_text_from_message(offending)
-        if not text:
+        inputs = self._extract_text_input(state, runtime, is_input=True)
+        if inputs is None:
             logger.debug("[%s] before_agent: no HumanMessage text found", self.name)
             return None
         logger.debug(
-            "[%s] before_agent: screening input text (%d chars)", self.name, len(text)
+            "[%s] before_agent: screening input text (%d chars)",
+            self.name,
+            len(inputs.text),
         )
-        violations = self._analyze_sync(text)
+        offending = self.get_human_message_from_state(state)
+        violations = self._analyze_sync(inputs.text)
         return self._handle_violations(violations, "agent.input", offending)
 
     def after_agent(
@@ -245,15 +341,17 @@ class AzureContentModerationMiddleware(_AzureContentSafetyBaseMiddleware):
         """Screen the last AIMessage after the agent runs."""
         if not self.apply_to_output:
             return None
-        offending = self.get_ai_message_from_state(state)
-        text = self.get_text_from_message(offending)
-        if not text:
+        inputs = self._extract_text_input(state, runtime, is_input=False)
+        if inputs is None:
             logger.debug("[%s] after_agent: no AIMessage text found", self.name)
             return None
         logger.debug(
-            "[%s] after_agent: screening output text (%d chars)", self.name, len(text)
+            "[%s] after_agent: screening output text (%d chars)",
+            self.name,
+            len(inputs.text),
         )
-        violations = self._analyze_sync(text)
+        offending = self.get_ai_message_from_state(state)
+        violations = self._analyze_sync(inputs.text)
         return self._handle_violations(violations, "agent.output", offending)
 
     # ------------------------------------------------------------------
@@ -266,15 +364,17 @@ class AzureContentModerationMiddleware(_AzureContentSafetyBaseMiddleware):
         """Async version of :meth:`before_agent`."""
         if not self.apply_to_input:
             return None
-        offending = self.get_human_message_from_state(state)
-        text = self.get_text_from_message(offending)
-        if not text:
+        inputs = self._extract_text_input(state, runtime, is_input=True)
+        if inputs is None:
             logger.debug("[%s] abefore_agent: no HumanMessage text found", self.name)
             return None
         logger.debug(
-            "[%s] abefore_agent: screening input text (%d chars)", self.name, len(text)
+            "[%s] abefore_agent: screening input text (%d chars)",
+            self.name,
+            len(inputs.text),
         )
-        violations = await self._analyze_async(text)
+        offending = self.get_human_message_from_state(state)
+        violations = await self._analyze_async(inputs.text)
         return self._handle_violations(violations, "agent.input", offending)
 
     async def aafter_agent(
@@ -283,15 +383,17 @@ class AzureContentModerationMiddleware(_AzureContentSafetyBaseMiddleware):
         """Async version of :meth:`after_agent`."""
         if not self.apply_to_output:
             return None
-        offending = self.get_ai_message_from_state(state)
-        text = self.get_text_from_message(offending)
-        if not text:
+        inputs = self._extract_text_input(state, runtime, is_input=False)
+        if inputs is None:
             logger.debug("[%s] aafter_agent: no AIMessage text found", self.name)
             return None
         logger.debug(
-            "[%s] aafter_agent: screening output text (%d chars)", self.name, len(text)
+            "[%s] aafter_agent: screening output text (%d chars)",
+            self.name,
+            len(inputs.text),
         )
-        violations = await self._analyze_async(text)
+        offending = self.get_ai_message_from_state(state)
+        violations = await self._analyze_async(inputs.text)
         return self._handle_violations(violations, "agent.output", offending)
 
     # ------------------------------------------------------------------
