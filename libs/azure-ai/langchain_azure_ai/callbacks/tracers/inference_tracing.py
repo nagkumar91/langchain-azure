@@ -1149,12 +1149,12 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         name: str = "AzureAIOpenTelemetryTracer",
         agent_id: Optional[str] = None,
         provider_name: Optional[str] = None,
-        message_keys: Sequence[str] = ("messages",),
-        message_paths: Sequence[str] = (),
+        message_keys: Optional[Sequence[str]] = None,
+        message_paths: Optional[Sequence[str]] = None,
         trace_all_langgraph_nodes: bool = False,
         ignore_start_node: bool = True,
         compat_create_agent_filtering: bool = True,
-        auto_configure_azure_monitor: bool = True,
+        auto_configure_azure_monitor: Optional[bool] = None,
         _prepare_messages_fn: Optional[
             Callable[..., tuple[Optional[str], Optional[str]]]
         ] = None,
@@ -1164,6 +1164,16 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         Set *auto_configure_azure_monitor* to ``False`` when your application
         already configures Azure Monitor (or any other ``TracerProvider``) to
         avoid duplicate telemetry export.
+
+        The following environment variables are recognized as fallbacks when
+        the corresponding constructor argument is not provided:
+
+        * ``OTEL_MESSAGE_KEYS`` – comma-separated list of state keys that
+          hold messages (default ``messages``).
+        * ``OTEL_MESSAGE_PATHS`` – comma-separated dotted paths for nested
+          message locations (default empty).
+        * ``OTEL_AUTO_CONFIGURE_AZURE_MONITOR`` – set to ``false`` to skip
+          automatic Azure Monitor configuration (default ``true``).
         """
         super().__init__()
         if _prepare_messages_fn is not None:
@@ -1183,11 +1193,32 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         self._default_agent_id = agent_id
         self._default_provider_name = provider_name
         self._content_recording = enable_content_recording
+
+        if message_keys is None:
+            env_keys = os.getenv("OTEL_MESSAGE_KEYS")
+            message_keys = (
+                tuple(k.strip() for k in env_keys.split(",") if k.strip())
+                if env_keys
+                else ("messages",)
+            )
         self._message_keys = tuple(message_keys)
+
+        if message_paths is None:
+            env_paths = os.getenv("OTEL_MESSAGE_PATHS")
+            message_paths = (
+                tuple(p.strip() for p in env_paths.split(",") if p.strip())
+                if env_paths
+                else ()
+            )
         self._message_paths = tuple(message_paths)
+
         self._trace_all_langgraph_nodes = trace_all_langgraph_nodes
         self._ignore_start_node = ignore_start_node
         self._compat_create_agent_filtering = compat_create_agent_filtering
+
+        if auto_configure_azure_monitor is None:
+            env_val = os.getenv("OTEL_AUTO_CONFIGURE_AZURE_MONITOR", "").lower()
+            auto_configure_azure_monitor = env_val not in {"0", "false", "no", "off"}
 
         if auto_configure_azure_monitor:
             if connection_string is None:

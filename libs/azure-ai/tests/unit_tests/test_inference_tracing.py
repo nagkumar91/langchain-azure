@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple, cast
@@ -2190,6 +2191,49 @@ def test_auto_configure_azure_monitor_false_skips_setup(
 
     mock_configure.assert_not_called()
     assert tracer._tracer is not None
+
+
+def test_auto_configure_azure_monitor_env_var_false(
+    reset_global_tracer_provider: None,
+) -> None:
+    """OTEL_AUTO_CONFIGURE_AZURE_MONITOR=false disables Azure Monitor setup."""
+    with (
+        patch.dict(os.environ, {"OTEL_AUTO_CONFIGURE_AZURE_MONITOR": "false"}),
+        patch.object(tracing, "configure_azure_monitor") as mock_configure,
+    ):
+        tracer = tracing.AzureAIOpenTelemetryTracer(
+            connection_string="InstrumentationKey=fake",
+        )
+    mock_configure.assert_not_called()
+    assert tracer._tracer is not None
+
+
+def test_message_keys_from_env_var() -> None:
+    """OTEL_MESSAGE_KEYS env var is used when message_keys is not passed."""
+    with patch.dict(os.environ, {"OTEL_MESSAGE_KEYS": "chat_history,messages"}):
+        tracer = tracing.AzureAIOpenTelemetryTracer(
+            auto_configure_azure_monitor=False,
+        )
+    assert tracer._message_keys == ("chat_history", "messages")
+
+
+def test_message_paths_from_env_var() -> None:
+    """OTEL_MESSAGE_PATHS env var is used when message_paths is not passed."""
+    with patch.dict(os.environ, {"OTEL_MESSAGE_PATHS": "state.messages,payload.msgs"}):
+        tracer = tracing.AzureAIOpenTelemetryTracer(
+            auto_configure_azure_monitor=False,
+        )
+    assert tracer._message_paths == ("state.messages", "payload.msgs")
+
+
+def test_message_keys_constructor_overrides_env_var() -> None:
+    """Explicit message_keys takes precedence over env var."""
+    with patch.dict(os.environ, {"OTEL_MESSAGE_KEYS": "ignored"}):
+        tracer = tracing.AzureAIOpenTelemetryTracer(
+            message_keys=("my_messages",),
+            auto_configure_azure_monitor=False,
+        )
+    assert tracer._message_keys == ("my_messages",)
 
 
 def test_configure_disables_http_instrumentors(
