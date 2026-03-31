@@ -70,6 +70,17 @@ module = [
   "azure.ai.projects.*",
   "azure.ai.contentsafety",
   "azure.ai.contentsafety.*",
+  "azure.ai.agents.*",
+  "azure.ai.inference",
+  "azure.ai.inference.*",
+  "azure.ai.textanalytics",
+  "azure.ai.textanalytics.*",
+  "azure.ai.vision.imageanalysis",
+  "azure.ai.vision.imageanalysis.*",
+  "azure.ai.documentintelligence",
+  "azure.ai.documentintelligence.*",
+  "azure.mgmt.logic",
+  "wrapt",
 ]
 ignore_missing_imports = true
 follow_imports = "skip"
