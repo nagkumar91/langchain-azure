@@ -62,6 +62,9 @@ _ENV_PROJECT_ENDPOINT = "AZURE_AI_PROJECT_ENDPOINT"
 _ENV_PROVIDER_NAME = "AZURE_TRACING_PROVIDER_NAME"
 _ENV_AGENT_ID = "AZURE_TRACING_AGENT_ID"
 _ENV_TRACE_ALL_LANGGRAPH_NODES = "AZURE_TRACING_ALL_LANGGRAPH_NODES"
+_ENV_MESSAGE_KEYS = "OTEL_MESSAGE_KEYS"
+_ENV_MESSAGE_PATHS = "OTEL_MESSAGE_PATHS"
+_ENV_AUTO_CONFIGURE_AZURE_MONITOR = "OTEL_AUTO_CONFIGURE_AZURE_MONITOR"
 
 _BASE_CALLBACK_MANAGER_MODULE = "langchain_core.callbacks.base"
 _BASE_CALLBACK_MANAGER_INIT = "BaseCallbackManager.__init__"
@@ -159,19 +162,44 @@ def enable_auto_tracing(
     provider_name: str | None = None,
     agent_id: str | None = None,
     trace_all_langgraph_nodes: bool | None = None,
+    message_keys: list[str] | tuple[str, ...] | None = None,
+    message_paths: list[str] | tuple[str, ...] | None = None,
+    auto_configure_azure_monitor: bool | None = None,
     tracer: AzureAIOpenTelemetryTracer | None = None,
 ) -> None:
     """Enable auto-injection of Azure tracer into callback managers.
 
+    When called, every new ``BaseCallbackManager`` instance created by
+    LangChain/LangGraph will automatically include an
+    ``AzureAIOpenTelemetryTracer`` in its inheritable handlers.
+
+    Each parameter falls back to an environment variable when not supplied:
+
+    * *connection_string* ← ``APPLICATION_INSIGHTS_CONNECTION_STRING``
+    * *enable_content_recording* ← ``AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED``
+    * *project_endpoint* ← ``AZURE_AI_PROJECT_ENDPOINT``
+    * *provider_name* ← ``AZURE_TRACING_PROVIDER_NAME``
+    * *agent_id* ← ``AZURE_TRACING_AGENT_ID``
+    * *trace_all_langgraph_nodes* ← ``AZURE_TRACING_ALL_LANGGRAPH_NODES``
+    * *message_keys* ← ``OTEL_MESSAGE_KEYS`` (comma-separated)
+    * *message_paths* ← ``OTEL_MESSAGE_PATHS`` (comma-separated)
+    * *auto_configure_azure_monitor* ← ``OTEL_AUTO_CONFIGURE_AZURE_MONITOR``
+
     Args:
         connection_string: Application Insights connection string.
         enable_content_recording: Whether to capture message/content payloads.
-        project_endpoint: Azure AI project endpoint for connection string fallback.
+        project_endpoint: Azure AI project endpoint for connection string
+            resolution.
         credential: Azure credential used with project endpoint resolution.
         provider_name: Default provider name for emitted GenAI spans.
         agent_id: Default agent identifier for emitted spans.
         trace_all_langgraph_nodes: Whether to trace all LangGraph nodes.
-        tracer: Pre-built tracer to inject directly.
+        message_keys: State keys that hold messages (e.g. ``["messages"]``).
+        message_paths: Dotted paths for nested message locations.
+        auto_configure_azure_monitor: Set to ``False`` to skip automatic
+            Azure Monitor configuration.
+        tracer: Pre-built tracer to inject directly.  When supplied, all
+            other configuration arguments are ignored.
     """
     global _active_tracer
 
@@ -203,16 +231,28 @@ def enable_auto_tracing(
                 if trace_all_langgraph_nodes is not None
                 else _env_bool(_ENV_TRACE_ALL_LANGGRAPH_NODES, False)
             )
-
-            tracer = tracer_class(
-                connection_string=resolved_connection_string,
-                enable_content_recording=resolved_enable_content_recording,
-                project_endpoint=resolved_project_endpoint,
-                credential=credential,
-                provider_name=resolved_provider_name,
-                agent_id=resolved_agent_id,
-                trace_all_langgraph_nodes=resolved_trace_all_langgraph_nodes,
+            resolved_auto_configure = (
+                auto_configure_azure_monitor
+                if auto_configure_azure_monitor is not None
+                else _env_bool(_ENV_AUTO_CONFIGURE_AZURE_MONITOR, True)
             )
+
+            tracer_kwargs: dict[str, Any] = {
+                "connection_string": resolved_connection_string,
+                "enable_content_recording": resolved_enable_content_recording,
+                "project_endpoint": resolved_project_endpoint,
+                "credential": credential,
+                "provider_name": resolved_provider_name,
+                "agent_id": resolved_agent_id,
+                "trace_all_langgraph_nodes": resolved_trace_all_langgraph_nodes,
+                "auto_configure_azure_monitor": resolved_auto_configure,
+            }
+            if message_keys is not None:
+                tracer_kwargs["message_keys"] = message_keys
+            if message_paths is not None:
+                tracer_kwargs["message_paths"] = message_paths
+
+            tracer = tracer_class(**tracer_kwargs)
 
         wrap_function_wrapper(
             _BASE_CALLBACK_MANAGER_MODULE,

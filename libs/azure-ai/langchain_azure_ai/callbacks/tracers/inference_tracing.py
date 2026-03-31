@@ -1256,7 +1256,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         )
 
         self._spans: Dict[str, _SpanRecord] = {}
-        self._lock = Lock()
+        self._lock = Lock()  # Guards _spans, _ignored_runs, _run_parent_override
         self._ignored_runs: set[str] = set()
         self._run_parent_override: Dict[str, Optional[str]] = {}
         self._langgraph_root_by_thread: Dict[str, str] = {}
@@ -1617,7 +1617,28 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         metadata: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Any:
-        """Handle start of a chain/agent invocation."""
+        """Handle start of a chain/agent invocation.
+
+        Creates an ``invoke_agent`` span when the chain represents a traced
+        LangGraph node or agent.  Chains that are filtered out by
+        ``_should_ignore_agent_span`` (internal routing, middleware, etc.) are
+        recorded in ``_ignored_runs`` so that :meth:`on_chain_end` and
+        :meth:`on_chain_error` skip them as well.
+
+        Args:
+            serialized: Serialized chain/agent descriptor containing class
+                name, module, and identifier fields.
+            inputs: The input dictionary passed to the chain.  Messages are
+                extracted using *message_keys* / *message_paths*.
+            run_id: Unique identifier for this run.
+            parent_run_id: Run ID of the parent chain, if any.
+            tags: Optional tags attached to this run.
+            metadata: LangGraph/LangChain metadata dict.  Key fields include
+                ``langgraph_node``, ``agent_name``, ``agent_id``,
+                ``thread_id``, ``otel_trace``, and ``otel_agent_span``.
+            **kwargs: Additional LangChain callback keyword arguments
+                (e.g. ``name``).
+        """
         metadata = metadata or {}
         agent_hint = _first_non_empty(
             metadata.get("agent_name"),
@@ -1628,8 +1649,9 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         run_key = str(run_id)
         parent_key = str(parent_run_id) if parent_run_id else None
         if self._should_ignore_agent_span(agent_hint, parent_run_id, metadata, kwargs):
-            self._ignored_runs.add(run_key)
-            self._run_parent_override[run_key] = parent_key
+            with self._lock:
+                self._ignored_runs.add(run_key)
+                self._run_parent_override[run_key] = parent_key
             return
         attributes: Dict[str, Any] = {
             Attrs.OPERATION_NAME: "invoke_agent",
@@ -1795,11 +1817,26 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
-        """Handle completion of a chain/agent invocation."""
+        """Handle completion of a chain/agent invocation.
+
+        Closes the ``invoke_agent`` span started by :meth:`on_chain_start`,
+        records output messages and GOTO routing metadata, propagates
+        accumulated token usage to parent agent spans, and emits the final
+        ``StatusCode.OK``.
+
+        Args:
+            outputs: The chain/agent output dictionary.  May contain messages
+                under the keys configured via *message_keys* / *message_paths*,
+                or be a LangGraph ``Command``-like object with a ``goto`` field.
+            run_id: Unique identifier for this run (matches ``on_chain_start``).
+            parent_run_id: Run ID of the parent chain, if any.
+            **kwargs: Additional LangChain callback keyword arguments.
+        """
         run_key = str(run_id)
         if run_key in self._ignored_runs:
-            self._ignored_runs.remove(run_key)
-            self._run_parent_override.pop(run_key, None)
+            with self._lock:
+                self._ignored_runs.discard(run_key)
+                self._run_parent_override.pop(run_key, None)
             return
         record = self._spans.get(run_key)
         if not record:
@@ -1849,11 +1886,23 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
-        """Handle errors raised during chain execution."""
+        """Handle errors raised during chain execution.
+
+        Records the error type and message on the span, sets
+        ``StatusCode.ERROR``, and propagates accumulated token usage before
+        closing the span.
+
+        Args:
+            error: The exception that was raised.
+            run_id: Unique identifier for this run.
+            parent_run_id: Run ID of the parent chain, if any.
+            **kwargs: Additional LangChain callback keyword arguments.
+        """
         run_key = str(run_id)
         if run_key in self._ignored_runs:
-            self._ignored_runs.remove(run_key)
-            self._run_parent_override.pop(run_key, None)
+            with self._lock:
+                self._ignored_runs.discard(run_key)
+                self._run_parent_override.pop(run_key, None)
             return
         record = self._spans.get(run_key)
         thread_key = record.stash.get("thread_id") if record else None
@@ -1883,7 +1932,19 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         metadata: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Any:
-        """Record chat model start metadata."""
+        """Record chat model start and create a ``chat`` span.
+
+        Args:
+            serialized: Serialized model descriptor with class and module info.
+            messages: Nested list of chat messages sent to the model.
+            run_id: Unique identifier for this LLM run.
+            parent_run_id: Run ID of the parent chain, if any.
+            tags: Optional tags attached to this run.
+            metadata: Metadata dict with model configuration, provider hints,
+                and ``invocation_params``.
+            **kwargs: Additional keyword arguments including
+                ``invocation_params``.
+        """
         self._handle_model_start(
             serialized=serialized,
             inputs=messages,
@@ -1905,7 +1966,18 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         metadata: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Any:
-        """Record LLM start metadata."""
+        """Record LLM (text-completion) start and create a ``text_completion`` span.
+
+        Args:
+            serialized: Serialized model descriptor.
+            prompts: Sequence of text prompts sent to the model.
+            run_id: Unique identifier for this LLM run.
+            parent_run_id: Run ID of the parent chain, if any.
+            tags: Optional tags attached to this run.
+            metadata: Metadata dict with model configuration.
+            **kwargs: Additional keyword arguments including
+                ``invocation_params``.
+        """
         self._handle_model_start(
             serialized=serialized,
             inputs=prompts,
@@ -1924,7 +1996,20 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
-        """Record LLM response attributes and finish the span."""
+        """Record LLM response attributes and finish the span.
+
+        Extracts token usage (input/output/total), response model name,
+        finish reason, tool calls, and assistant messages from the
+        ``LLMResult``.  Token counts are propagated to parent agent spans
+        for aggregated usage reporting.
+
+        Args:
+            response: The ``LLMResult`` containing generations and
+                ``llm_output`` with token usage and model metadata.
+            run_id: Unique identifier for this LLM run.
+            parent_run_id: Run ID of the parent chain, if any.
+            **kwargs: Additional LangChain callback keyword arguments.
+        """
         record = self._spans.get(str(run_id))
         if not record:
             return
@@ -2046,7 +2131,14 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
-        """Mark the LLM span as errored."""
+        """Mark the LLM span as errored and close it.
+
+        Args:
+            error: The exception that was raised during model invocation.
+            run_id: Unique identifier for this LLM run.
+            parent_run_id: Run ID of the parent chain, if any.
+            **kwargs: Additional LangChain callback keyword arguments.
+        """
         self._end_span(
             run_id,
             status=Status(StatusCode.ERROR, str(error)),
@@ -2061,7 +2153,19 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
-        """Record streaming chunk timing metrics without mutating span events."""
+        """Record streaming chunk timing metrics without mutating span events.
+
+        Updates the ``time_to_first_chunk`` histogram on the first token and
+        ``time_per_output_chunk`` on subsequent tokens.  No span events or
+        attributes are written here — the final response is recorded in
+        :meth:`on_llm_end`.
+
+        Args:
+            token: The streaming token string.
+            run_id: Unique identifier for this LLM run.
+            parent_run_id: Run ID of the parent chain, if any.
+            **kwargs: Additional LangChain callback keyword arguments.
+        """
         record = self._spans.get(str(run_id))
         if not record or not _is_model_operation(record.operation):
             return
@@ -2095,7 +2199,22 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         inputs: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Any:
-        """Create a span representing tool execution."""
+        """Create a span representing tool execution.
+
+        Records the tool name, description, type, and input arguments.
+        When content recording is enabled, tool call arguments are included
+        in the span attributes.
+
+        Args:
+            serialized: Serialized tool descriptor with ``name`` and
+                ``description`` fields.
+            input_str: String representation of the tool input.
+            run_id: Unique identifier for this tool run.
+            parent_run_id: Run ID of the parent chain/agent.
+            metadata: Metadata dict with ``thread_id``, ``tool_name``, etc.
+            inputs: Structured tool input dictionary (when available).
+            **kwargs: Additional keyword arguments including ``name``.
+        """
         metadata = metadata or {}
         resolved_parent = self._resolve_parent_id(parent_run_id)
         thread_identifier = _first_non_empty(
@@ -2157,7 +2276,17 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
-        """Finalize a tool span with results."""
+        """Finalize a tool span with results and close it.
+
+        Records the tool output.  If the output is a LangGraph
+        ``Command``-like object, GOTO routing metadata is also captured.
+
+        Args:
+            output: The tool result (string, dict, or ``Command``-like).
+            run_id: Unique identifier for this tool run.
+            parent_run_id: Run ID of the parent chain/agent.
+            **kwargs: Additional LangChain callback keyword arguments.
+        """
         record = self._spans.get(str(run_id))
         if not record:
             return
@@ -2183,7 +2312,14 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
-        """Mark a tool span as errored."""
+        """Mark a tool span as errored and close it.
+
+        Args:
+            error: The exception that was raised during tool execution.
+            run_id: Unique identifier for this tool run.
+            parent_run_id: Run ID of the parent chain/agent.
+            **kwargs: Additional LangChain callback keyword arguments.
+        """
         self._end_span(
             run_id,
             status=Status(StatusCode.ERROR, str(error)),
@@ -2198,7 +2334,18 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
-        """Cache tool context emitted from agent actions."""
+        """Cache tool context emitted from agent actions.
+
+        ``AgentAction`` is emitted before tool execution.  This method stores
+        the tool name, input, and log in the parent agent span's stash so that
+        subsequent :meth:`on_tool_start` calls can include richer context.
+
+        Args:
+            action: The ``AgentAction`` containing tool name, input, and log.
+            run_id: Unique identifier for this run.
+            parent_run_id: Run ID of the parent agent.
+            **kwargs: Additional LangChain callback keyword arguments.
+        """
         # AgentAction is emitted before tool execution; store arguments so that
         # subsequent tool spans can include more context.
         resolved_parent = self._resolve_parent_id(parent_run_id)
@@ -2221,7 +2368,14 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
-        """Close an agent span and record outputs."""
+        """Close an agent span, record outputs, and propagate token usage.
+
+        Args:
+            finish: The ``AgentFinish`` containing return values.
+            run_id: Unique identifier for this run.
+            parent_run_id: Run ID of the parent chain, if any.
+            **kwargs: Additional LangChain callback keyword arguments.
+        """
         record = self._spans.get(str(run_id))
         if not record:
             return
@@ -2243,7 +2397,20 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         metadata: Optional[dict[str, Any]] = None,
         **kwargs: Any,
     ) -> Any:
-        """Start a retriever span."""
+        """Start a retriever span.
+
+        Creates an ``execute_tool`` span with ``tool_type=retriever`` and
+        records the retriever query.
+
+        Args:
+            serialized: Serialized retriever descriptor with ``name`` and
+                ``description``.
+            query: The retriever query string.
+            run_id: Unique identifier for this retriever run.
+            parent_run_id: Run ID of the parent chain, if any.
+            metadata: Metadata dict with ``thread_id``, etc.
+            **kwargs: Additional LangChain callback keyword arguments.
+        """
         metadata = metadata or {}
         serialized = serialized or {}
         resolved_parent = self._resolve_parent_id(parent_run_id)
@@ -2285,7 +2452,18 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
-        """Record retriever results and close the span."""
+        """Record retriever results and close the span.
+
+        Formats retrieved documents and stores them as the
+        ``gen_ai.retriever.results`` span attribute.
+
+        Args:
+            documents: Sequence of ``Document`` objects returned by the
+                retriever.
+            run_id: Unique identifier for this retriever run.
+            parent_run_id: Run ID of the parent chain, if any.
+            **kwargs: Additional LangChain callback keyword arguments.
+        """
         record = self._spans.get(str(run_id))
         if not record:
             return
@@ -2304,7 +2482,14 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         parent_run_id: Optional[UUID] = None,
         **kwargs: Any,
     ) -> Any:
-        """Mark a retriever span as errored."""
+        """Mark a retriever span as errored and close it.
+
+        Args:
+            error: The exception that was raised during retrieval.
+            run_id: Unique identifier for this retriever run.
+            parent_run_id: Run ID of the parent chain, if any.
+            **kwargs: Additional LangChain callback keyword arguments.
+        """
         self._end_span(
             run_id,
             status=Status(StatusCode.ERROR, str(error)),
@@ -2600,7 +2785,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         if _is_model_operation(operation):
             span_record.stash["started_at"] = time.perf_counter()
         self._spans[run_key] = span_record
-        self._run_parent_override[run_key] = resolved_parent_key
+        with self._lock:
+            self._run_parent_override[run_key] = resolved_parent_key
         # Publish the agent span context so asyncio.create_task() inherits
         # it.  Workers that share this tracer instance will pick it up as a
         # last-resort parent when all other resolution strategies fail.
@@ -2697,7 +2883,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                     "context in different execution context: %s",
                     run_id,
                 )
-        self._run_parent_override.pop(str(run_id), None)
+        with self._lock:
+            self._run_parent_override.pop(str(run_id), None)
 
     @classmethod
     def _configure_azure_monitor(cls, connection_string: str) -> None:
