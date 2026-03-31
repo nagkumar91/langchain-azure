@@ -195,6 +195,7 @@ class Attrs:
     ERROR_TYPE = "error.type"
     RETRIEVER_RESULTS = "gen_ai.retriever.results"
     RETRIEVER_QUERY = "gen_ai.retriever.query"
+    AGENT_STATE = "gen_ai.agent.state"
 
     # Optional vendor-specific attributes
     OPENAI_REQUEST_SERVICE_TIER = "openai.request.service_tier"
@@ -208,6 +209,35 @@ def _as_json_attribute(value: Any) -> str:
         return json.dumps(value, default=str, ensure_ascii=False)
     except Exception:  # pragma: no cover - defensive
         return json.dumps(str(value), ensure_ascii=False)
+
+
+def _serialize_state(
+    state: Any,
+    *,
+    record_content: bool,
+    max_size: int,
+) -> Optional[str]:
+    """Serialize a LangGraph state dict for span attributes.
+
+    Returns ``None`` if the state is empty or not dict-like.  When
+    *record_content* is ``False``, values are replaced with type
+    placeholders to avoid leaking sensitive data.
+    """
+    mapping = _to_mapping(state)
+    if not mapping:
+        return None
+    if not record_content:
+        mapping = {
+            k: f"[{type(v).__name__}]" if not isinstance(v, str) else "[redacted]"
+            for k, v in mapping.items()
+        }
+    try:
+        serialized = json.dumps(mapping, default=str, ensure_ascii=False)
+    except Exception:  # pragma: no cover - defensive
+        return None
+    if len(serialized) > max_size:
+        serialized = serialized[:max_size] + "...[truncated]"
+    return serialized
 
 
 def _redact_text_content() -> dict[str, str]:
@@ -1200,6 +1230,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         ignore_start_node: bool = True,
         compat_create_agent_filtering: bool = True,
         auto_configure_azure_monitor: Optional[bool] = None,
+        trace_state: Optional[bool] = None,
+        max_state_size: int = 32768,
         _prepare_messages_fn: Optional[
             Callable[..., tuple[Optional[str], Optional[str]]]
         ] = None,
@@ -1219,6 +1251,11 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
           message locations (default empty).
         * ``OTEL_AUTO_CONFIGURE_AZURE_MONITOR`` – set to ``false`` to skip
           automatic Azure Monitor configuration (default ``true``).
+        * ``OTEL_TRACE_LANGGRAPH_STATE`` – set to ``true`` to capture the
+          full LangGraph state on each agent node span as
+          ``gen_ai.agent.state`` (default ``false``).
+        * ``OTEL_MAX_STATE_SIZE`` – maximum character length for serialized
+          state (default ``32768``).
         """
         super().__init__()
         if _prepare_messages_fn is not None:
@@ -1260,6 +1297,14 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         self._trace_all_langgraph_nodes = trace_all_langgraph_nodes
         self._ignore_start_node = ignore_start_node
         self._compat_create_agent_filtering = compat_create_agent_filtering
+
+        if trace_state is None:
+            env_val = os.getenv("OTEL_TRACE_LANGGRAPH_STATE", "").lower()
+            trace_state = env_val in {"1", "true", "yes", "on"}
+        self._trace_state = trace_state
+
+        env_max = os.getenv("OTEL_MAX_STATE_SIZE")
+        self._max_state_size = int(env_max) if env_max else max_state_size
 
         if auto_configure_azure_monitor is None:
             env_val = os.getenv("OTEL_AUTO_CONFIGURE_AZURE_MONITOR", "").lower()
@@ -1761,6 +1806,15 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         if system_instr:
             attributes[Attrs.SYSTEM_INSTRUCTIONS] = system_instr
 
+        if self._trace_state:
+            state_json = _serialize_state(
+                inputs,
+                record_content=self._content_recording,
+                max_size=self._max_state_size,
+            )
+            if state_json:
+                attributes[Attrs.AGENT_STATE] = state_json
+
         trace_headers = (
             _extract_trace_headers(metadata)
             or _extract_trace_headers(inputs)
@@ -1913,6 +1967,16 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                     record.span.set_attribute(Attrs.OUTPUT_MESSAGES, formatted_messages)
         except Exception as exc:  # pragma: no cover - defensive
             LOGGER.debug("Failed to serialise chain outputs: %s", exc, exc_info=True)
+
+        if self._trace_state and record.operation == "invoke_agent":
+            state_json = _serialize_state(
+                outputs_payload,
+                record_content=self._content_recording,
+                max_size=self._max_state_size,
+            )
+            if state_json:
+                record.span.set_attribute(Attrs.AGENT_STATE, state_json)
+
         record.span.set_status(Status(status_code=StatusCode.OK))
         self._propagate_agent_usage_totals(record)
         if (

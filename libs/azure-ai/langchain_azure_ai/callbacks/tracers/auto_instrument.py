@@ -165,6 +165,8 @@ def enable_auto_tracing(
     message_keys: list[str] | tuple[str, ...] | None = None,
     message_paths: list[str] | tuple[str, ...] | None = None,
     auto_configure_azure_monitor: bool | None = None,
+    trace_state: bool | None = None,
+    max_state_size: int | None = None,
     tracer: AzureAIOpenTelemetryTracer | None = None,
 ) -> None:
     """Enable auto-injection of Azure tracer into callback managers.
@@ -184,6 +186,8 @@ def enable_auto_tracing(
     * *message_keys* ← ``OTEL_MESSAGE_KEYS`` (comma-separated)
     * *message_paths* ← ``OTEL_MESSAGE_PATHS`` (comma-separated)
     * *auto_configure_azure_monitor* ← ``OTEL_AUTO_CONFIGURE_AZURE_MONITOR``
+    * *trace_state* ← ``OTEL_TRACE_LANGGRAPH_STATE``
+    * *max_state_size* ← ``OTEL_MAX_STATE_SIZE``
 
     Args:
         connection_string: Application Insights connection string.
@@ -198,6 +202,10 @@ def enable_auto_tracing(
         message_paths: Dotted paths for nested message locations.
         auto_configure_azure_monitor: Set to ``False`` to skip automatic
             Azure Monitor configuration.
+        trace_state: Whether to capture the full LangGraph state on each
+            agent node span (default ``False``).
+        max_state_size: Maximum character length for serialized state
+            (default ``32768``).
         tracer: Pre-built tracer to inject directly.  When supplied, all
             other configuration arguments are ignored.
     """
@@ -251,6 +259,10 @@ def enable_auto_tracing(
                 tracer_kwargs["message_keys"] = message_keys
             if message_paths is not None:
                 tracer_kwargs["message_paths"] = message_paths
+            if trace_state is not None:
+                tracer_kwargs["trace_state"] = trace_state
+            if max_state_size is not None:
+                tracer_kwargs["max_state_size"] = max_state_size
 
             tracer = tracer_class(**tracer_kwargs)
 

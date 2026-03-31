@@ -2236,6 +2236,137 @@ def test_message_keys_constructor_overrides_env_var() -> None:
     assert tracer._message_keys == ("my_messages",)
 
 
+def test_trace_state_default_false() -> None:
+    """trace_state defaults to False."""
+    tracer = tracing.AzureAIOpenTelemetryTracer(
+        auto_configure_azure_monitor=False,
+    )
+    assert tracer._trace_state is False
+
+
+def test_trace_state_env_var() -> None:
+    """OTEL_TRACE_LANGGRAPH_STATE env var enables state tracing."""
+    with patch.dict(os.environ, {"OTEL_TRACE_LANGGRAPH_STATE": "true"}):
+        tracer = tracing.AzureAIOpenTelemetryTracer(
+            auto_configure_azure_monitor=False,
+        )
+    assert tracer._trace_state is True
+
+
+def test_trace_state_constructor_overrides_env() -> None:
+    """Explicit trace_state=False overrides env var."""
+    with patch.dict(os.environ, {"OTEL_TRACE_LANGGRAPH_STATE": "true"}):
+        tracer = tracing.AzureAIOpenTelemetryTracer(
+            trace_state=False,
+            auto_configure_azure_monitor=False,
+        )
+    assert tracer._trace_state is False
+
+
+def test_max_state_size_env_var() -> None:
+    """OTEL_MAX_STATE_SIZE env var overrides default."""
+    with patch.dict(os.environ, {"OTEL_MAX_STATE_SIZE": "1024"}):
+        tracer = tracing.AzureAIOpenTelemetryTracer(
+            auto_configure_azure_monitor=False,
+        )
+    assert tracer._max_state_size == 1024
+
+
+def test_serialize_state_records_on_agent_span() -> None:
+    """When trace_state=True, gen_ai.agent.state is set on chain spans."""
+    tracer = tracing.AzureAIOpenTelemetryTracer(
+        trace_state=True,
+        auto_configure_azure_monitor=False,
+        enable_content_recording=True,
+        trace_all_langgraph_nodes=True,
+    )
+    run_id = uuid4()
+    state = {"messages": [{"role": "user", "content": "hello"}], "plan": {"step": 1}}
+    tracer.on_chain_start(
+        serialized={"id": ["test"]},
+        inputs=state,
+        run_id=run_id,
+        metadata={"langgraph_node": "planner", "otel_trace": True},
+    )
+    record = tracer._spans.get(str(run_id))
+    assert record is not None
+    assert "gen_ai.agent.state" in record.attributes
+    state_val = record.attributes["gen_ai.agent.state"]
+    assert '"plan"' in state_val
+    assert '"step": 1' in state_val
+    tracer.on_chain_end({"result": "done"}, run_id=run_id)
+
+
+def test_serialize_state_redacts_when_content_recording_off() -> None:
+    """When content recording is off, state values are type placeholders."""
+    tracer = tracing.AzureAIOpenTelemetryTracer(
+        trace_state=True,
+        auto_configure_azure_monitor=False,
+        enable_content_recording=False,
+        trace_all_langgraph_nodes=True,
+    )
+    run_id = uuid4()
+    state = {"messages": [{"role": "user", "content": "secret"}], "count": 42}
+    tracer.on_chain_start(
+        serialized={"id": ["test"]},
+        inputs=state,
+        run_id=run_id,
+        metadata={"langgraph_node": "node1", "otel_trace": True},
+    )
+    record = tracer._spans.get(str(run_id))
+    assert record is not None
+    state_val = record.attributes["gen_ai.agent.state"]
+    assert "secret" not in state_val
+    assert "[list]" in state_val
+    assert "[int]" in state_val
+    tracer.on_chain_end({}, run_id=run_id)
+
+
+def test_serialize_state_truncates_large_state() -> None:
+    """State is truncated when exceeding max_state_size."""
+    tracer = tracing.AzureAIOpenTelemetryTracer(
+        trace_state=True,
+        max_state_size=50,
+        auto_configure_azure_monitor=False,
+        enable_content_recording=True,
+        trace_all_langgraph_nodes=True,
+    )
+    run_id = uuid4()
+    state = {"data": "x" * 200}
+    tracer.on_chain_start(
+        serialized={"id": ["test"]},
+        inputs=state,
+        run_id=run_id,
+        metadata={"langgraph_node": "node1", "otel_trace": True},
+    )
+    record = tracer._spans.get(str(run_id))
+    assert record is not None
+    state_val = record.attributes["gen_ai.agent.state"]
+    assert state_val.endswith("...[truncated]")
+    assert len(state_val) < 200
+    tracer.on_chain_end({}, run_id=run_id)
+
+
+def test_trace_state_false_does_not_record() -> None:
+    """When trace_state=False, gen_ai.agent.state is not set."""
+    tracer = tracing.AzureAIOpenTelemetryTracer(
+        trace_state=False,
+        auto_configure_azure_monitor=False,
+        trace_all_langgraph_nodes=True,
+    )
+    run_id = uuid4()
+    tracer.on_chain_start(
+        serialized={"id": ["test"]},
+        inputs={"messages": [], "plan": {}},
+        run_id=run_id,
+        metadata={"langgraph_node": "node1", "otel_trace": True},
+    )
+    record = tracer._spans.get(str(run_id))
+    assert record is not None
+    assert "gen_ai.agent.state" not in record.attributes
+    tracer.on_chain_end({}, run_id=run_id)
+
+
 def test_configure_disables_http_instrumentors(
     reset_global_tracer_provider: None,
 ) -> None:
