@@ -63,6 +63,43 @@ try:  # pragma: no cover - imported lazily in production environments
     from opentelemetry import trace as otel_trace
     from opentelemetry.context import attach, detach
     from opentelemetry.propagate import extract
+    from opentelemetry.semconv._incubating.attributes.gen_ai_attributes import (
+        GEN_AI_AGENT_DESCRIPTION,
+        GEN_AI_AGENT_ID,
+        GEN_AI_AGENT_NAME,
+        GEN_AI_CONVERSATION_ID,
+        GEN_AI_DATA_SOURCE_ID,
+        GEN_AI_INPUT_MESSAGES,
+        GEN_AI_OPERATION_NAME,
+        GEN_AI_OUTPUT_MESSAGES,
+        GEN_AI_OUTPUT_TYPE,
+        GEN_AI_PROVIDER_NAME,
+        GEN_AI_REQUEST_CHOICE_COUNT,
+        GEN_AI_REQUEST_ENCODING_FORMATS,
+        GEN_AI_REQUEST_FREQUENCY_PENALTY,
+        GEN_AI_REQUEST_MAX_TOKENS,
+        GEN_AI_REQUEST_MODEL,
+        GEN_AI_REQUEST_PRESENCE_PENALTY,
+        GEN_AI_REQUEST_SEED,
+        GEN_AI_REQUEST_STOP_SEQUENCES,
+        GEN_AI_REQUEST_TEMPERATURE,
+        GEN_AI_REQUEST_TOP_K,
+        GEN_AI_REQUEST_TOP_P,
+        GEN_AI_RESPONSE_FINISH_REASONS,
+        GEN_AI_RESPONSE_ID,
+        GEN_AI_RESPONSE_MODEL,
+        GEN_AI_SYSTEM_INSTRUCTIONS,
+        GEN_AI_TOKEN_TYPE,
+        GEN_AI_TOOL_CALL_ARGUMENTS,
+        GEN_AI_TOOL_CALL_ID,
+        GEN_AI_TOOL_CALL_RESULT,
+        GEN_AI_TOOL_DEFINITIONS,
+        GEN_AI_TOOL_DESCRIPTION,
+        GEN_AI_TOOL_NAME,
+        GEN_AI_TOOL_TYPE,
+        GEN_AI_USAGE_INPUT_TOKENS,
+        GEN_AI_USAGE_OUTPUT_TOKENS,
+    )
     from opentelemetry.semconv.schemas import Schemas
     from opentelemetry.trace import (
         Span,
@@ -105,46 +142,54 @@ _inherited_agent_context: ContextVar[Optional[Tuple[str, Any]]] = ContextVar(
 
 
 class Attrs:
-    """Semantic convention attribute names used throughout the tracer."""
+    """Semantic convention attribute names used throughout the tracer.
 
-    PROVIDER_NAME = "gen_ai.provider.name"
-    OPERATION_NAME = "gen_ai.operation.name"
-    REQUEST_MODEL = "gen_ai.request.model"
-    REQUEST_MAX_TOKENS = "gen_ai.request.max_tokens"
+    Attributes sourced from the OpenTelemetry GenAI semantic conventions SDK
+    (``opentelemetry.semconv._incubating.attributes.gen_ai_attributes``).
+    Custom attributes not yet in the SDK are defined inline.
+    """
+
+    # --- GenAI SDK attributes ---
+    PROVIDER_NAME = GEN_AI_PROVIDER_NAME
+    OPERATION_NAME = GEN_AI_OPERATION_NAME
+    REQUEST_MODEL = GEN_AI_REQUEST_MODEL
+    REQUEST_MAX_TOKENS = GEN_AI_REQUEST_MAX_TOKENS
+    REQUEST_TEMPERATURE = GEN_AI_REQUEST_TEMPERATURE
+    REQUEST_TOP_P = GEN_AI_REQUEST_TOP_P
+    REQUEST_TOP_K = GEN_AI_REQUEST_TOP_K
+    REQUEST_STOP = GEN_AI_REQUEST_STOP_SEQUENCES
+    REQUEST_FREQ_PENALTY = GEN_AI_REQUEST_FREQUENCY_PENALTY
+    REQUEST_PRES_PENALTY = GEN_AI_REQUEST_PRESENCE_PENALTY
+    REQUEST_CHOICE_COUNT = GEN_AI_REQUEST_CHOICE_COUNT
+    REQUEST_SEED = GEN_AI_REQUEST_SEED
+    REQUEST_ENCODING_FORMATS = GEN_AI_REQUEST_ENCODING_FORMATS
+    RESPONSE_ID = GEN_AI_RESPONSE_ID
+    RESPONSE_MODEL = GEN_AI_RESPONSE_MODEL
+    RESPONSE_FINISH_REASONS = GEN_AI_RESPONSE_FINISH_REASONS
+    USAGE_INPUT_TOKENS = GEN_AI_USAGE_INPUT_TOKENS
+    USAGE_OUTPUT_TOKENS = GEN_AI_USAGE_OUTPUT_TOKENS
+    TOKEN_TYPE = GEN_AI_TOKEN_TYPE
+    INPUT_MESSAGES = GEN_AI_INPUT_MESSAGES
+    OUTPUT_MESSAGES = GEN_AI_OUTPUT_MESSAGES
+    SYSTEM_INSTRUCTIONS = GEN_AI_SYSTEM_INSTRUCTIONS
+    OUTPUT_TYPE = GEN_AI_OUTPUT_TYPE
+    TOOL_NAME = GEN_AI_TOOL_NAME
+    TOOL_TYPE = GEN_AI_TOOL_TYPE
+    TOOL_DESCRIPTION = GEN_AI_TOOL_DESCRIPTION
+    TOOL_DEFINITIONS = GEN_AI_TOOL_DEFINITIONS
+    TOOL_CALL_ID = GEN_AI_TOOL_CALL_ID
+    TOOL_CALL_ARGUMENTS = GEN_AI_TOOL_CALL_ARGUMENTS
+    TOOL_CALL_RESULT = GEN_AI_TOOL_CALL_RESULT
+    DATA_SOURCE_ID = GEN_AI_DATA_SOURCE_ID
+    AGENT_ID = GEN_AI_AGENT_ID
+    AGENT_NAME = GEN_AI_AGENT_NAME
+    AGENT_DESCRIPTION = GEN_AI_AGENT_DESCRIPTION
+    CONVERSATION_ID = GEN_AI_CONVERSATION_ID
+
+    # --- Custom / non-GenAI semconv attributes ---
     REQUEST_MAX_INPUT_TOKENS = "gen_ai.request.max_input_tokens"
     REQUEST_MAX_OUTPUT_TOKENS = "gen_ai.request.max_output_tokens"
-    REQUEST_TEMPERATURE = "gen_ai.request.temperature"
-    REQUEST_TOP_P = "gen_ai.request.top_p"
-    REQUEST_TOP_K = "gen_ai.request.top_k"
-    REQUEST_STOP = "gen_ai.request.stop_sequences"
-    REQUEST_FREQ_PENALTY = "gen_ai.request.frequency_penalty"
-    REQUEST_PRES_PENALTY = "gen_ai.request.presence_penalty"
-    REQUEST_CHOICE_COUNT = "gen_ai.request.choice.count"
-    REQUEST_SEED = "gen_ai.request.seed"
-    REQUEST_ENCODING_FORMATS = "gen_ai.request.encoding_formats"
-    RESPONSE_ID = "gen_ai.response.id"
-    RESPONSE_MODEL = "gen_ai.response.model"
-    RESPONSE_FINISH_REASONS = "gen_ai.response.finish_reasons"
-    USAGE_INPUT_TOKENS = "gen_ai.usage.input_tokens"
-    USAGE_OUTPUT_TOKENS = "gen_ai.usage.output_tokens"
     USAGE_TOTAL_TOKENS = "gen_ai.usage.total_tokens"
-    TOKEN_TYPE = "gen_ai.token.type"
-    INPUT_MESSAGES = "gen_ai.input.messages"
-    OUTPUT_MESSAGES = "gen_ai.output.messages"
-    SYSTEM_INSTRUCTIONS = "gen_ai.system_instructions"
-    OUTPUT_TYPE = "gen_ai.output.type"
-    TOOL_NAME = "gen_ai.tool.name"
-    TOOL_TYPE = "gen_ai.tool.type"
-    TOOL_DESCRIPTION = "gen_ai.tool.description"
-    TOOL_DEFINITIONS = "gen_ai.tool.definitions"
-    TOOL_CALL_ID = "gen_ai.tool.call.id"
-    TOOL_CALL_ARGUMENTS = "gen_ai.tool.call.arguments"
-    TOOL_CALL_RESULT = "gen_ai.tool.call.result"
-    DATA_SOURCE_ID = "gen_ai.data_source.id"
-    AGENT_ID = "gen_ai.agent.id"
-    AGENT_NAME = "gen_ai.agent.name"
-    AGENT_DESCRIPTION = "gen_ai.agent.description"
-    CONVERSATION_ID = "gen_ai.conversation.id"
     SERVER_ADDRESS = "server.address"
     SERVER_PORT = "server.port"
     ERROR_TYPE = "error.type"
@@ -1137,7 +1182,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
 
     _azure_monitor_configured: bool = False
     _configure_lock: Lock = Lock()
-    _schema_url: str = Schemas.V1_28_0.value
+    _schema_url: str = Schemas.V1_38_0.value
 
     def __init__(
         self,
