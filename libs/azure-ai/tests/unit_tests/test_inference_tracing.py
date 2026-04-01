@@ -3087,3 +3087,68 @@ def test_start_span_attributes_survive_sampler_that_drops_constructor_attrs() ->
     # Attributes must be present even though the mock sampler dropped them
     assert span.attributes.get("gen_ai.operation.name") == "invoke_agent"
     assert span.attributes.get("gen_ai.agent.name") == "TestAgent"
+
+
+# ---------------------------------------------------------------------------
+# _resolve_agent_name priority tests
+# ---------------------------------------------------------------------------
+
+def test_resolve_agent_name_langgraph_node_takes_priority_over_agent_name():
+    """langgraph_node is per-node and should beat per-graph agent_name."""
+    result = tracing._resolve_agent_name(
+        serialized=None,
+        metadata={"agent_name": "my-agent", "langgraph_node": "draft_plan"},
+        callback_kwargs={},
+        default="AzureAIOpenTelemetryTracer",
+    )
+    assert result == "draft_plan"
+
+
+def test_resolve_agent_name_falls_back_to_agent_name_when_no_node():
+    """agent_name is used when langgraph_node is absent."""
+    result = tracing._resolve_agent_name(
+        serialized=None,
+        metadata={"agent_name": "my-agent"},
+        callback_kwargs={},
+        default="AzureAIOpenTelemetryTracer",
+    )
+    assert result == "my-agent"
+
+
+def test_resolve_agent_name_generic_langgraph_node_falls_through():
+    """A generic LangGraph node name like 'LangGraph' should fall through."""
+    result = tracing._resolve_agent_name(
+        serialized=None,
+        metadata={
+            "agent_name": "my-agent",
+            "langgraph_node": "LangGraph",
+        },
+        callback_kwargs={},
+        default="AzureAIOpenTelemetryTracer",
+    )
+    assert result == "my-agent"
+
+
+def test_resolve_agent_name_default_marker_falls_through():
+    """If langgraph_node equals the default, it should fall through."""
+    result = tracing._resolve_agent_name(
+        serialized=None,
+        metadata={
+            "agent_name": "my-agent",
+            "langgraph_node": "AzureAIOpenTelemetryTracer",
+        },
+        callback_kwargs={},
+        default="AzureAIOpenTelemetryTracer",
+    )
+    assert result == "my-agent"
+
+
+def test_resolve_agent_name_both_absent_uses_default():
+    """Falls back to default when both agent_name and node are absent."""
+    result = tracing._resolve_agent_name(
+        serialized=None,
+        metadata={},
+        callback_kwargs={},
+        default="fallback",
+    )
+    assert result == "fallback"

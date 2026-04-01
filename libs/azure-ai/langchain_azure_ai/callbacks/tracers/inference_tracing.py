@@ -683,15 +683,23 @@ def _resolve_agent_name(
     default: str,
 ) -> str:
     serialized = serialized or {}
+    generic_markers = {"", _LANGGRAPH_GENERIC_NAME, default}
+
+    # langgraph_node is per-node and more specific than agent_name which
+    # is per-graph (inherited by all children).  Prefer the node name so
+    # that individual workflow steps get distinct span names.
+    langgraph_node = metadata.get("langgraph_node")
+    if langgraph_node and str(langgraph_node).strip() not in generic_markers:
+        return str(langgraph_node)
+
+    # Fall through to agent_name, agent_type, etc.
     candidate = _first_non_empty(
         metadata.get("agent_name"),
-        metadata.get("langgraph_node"),
         metadata.get("agent_type"),
         callback_kwargs.get("name"),
     )
     resolved = str(candidate) if candidate else None
 
-    generic_markers = {"", _LANGGRAPH_GENERIC_NAME, default}
     if resolved is None or resolved.strip() in generic_markers:
         path = metadata.get("langgraph_path")
         if isinstance(path, (list, tuple)) and path:
@@ -1731,8 +1739,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         """
         metadata = metadata or {}
         agent_hint = _first_non_empty(
-            metadata.get("agent_name"),
             metadata.get("langgraph_node"),
+            metadata.get("agent_name"),
             metadata.get("agent_type"),
             kwargs.get("name"),
         )

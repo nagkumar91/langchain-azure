@@ -245,6 +245,14 @@ def enable_auto_tracing(
                 else _env_bool(_ENV_AUTO_CONFIGURE_AZURE_MONITOR, True)
             )
 
+            # Derive tracer name from agent_id or OTEL_SERVICE_NAME so that
+            # _resolve_agent_name treats it as a known generic marker and
+            # falls through to per-node langgraph_node names.
+            resolved_name = (
+                resolved_agent_id
+                or os.getenv("OTEL_SERVICE_NAME")
+            )
+
             tracer_kwargs: dict[str, Any] = {
                 "connection_string": resolved_connection_string,
                 "enable_content_recording": resolved_enable_content_recording,
@@ -255,6 +263,8 @@ def enable_auto_tracing(
                 "trace_all_langgraph_nodes": resolved_trace_all_langgraph_nodes,
                 "auto_configure_azure_monitor": resolved_auto_configure,
             }
+            if resolved_name:
+                tracer_kwargs["name"] = resolved_name
             if message_keys is not None:
                 tracer_kwargs["message_keys"] = message_keys
             if message_paths is not None:
