@@ -248,10 +248,7 @@ def enable_auto_tracing(
             # Derive tracer name from agent_id or OTEL_SERVICE_NAME so that
             # _resolve_agent_name treats it as a known generic marker and
             # falls through to per-node langgraph_node names.
-            resolved_name = (
-                resolved_agent_id
-                or os.getenv("OTEL_SERVICE_NAME")
-            )
+            resolved_name = resolved_agent_id or os.getenv("OTEL_SERVICE_NAME")
 
             tracer_kwargs: dict[str, Any] = {
                 "connection_string": resolved_connection_string,
