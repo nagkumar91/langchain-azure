@@ -685,9 +685,14 @@ def _resolve_agent_name(
     serialized = serialized or {}
     generic_markers = {"", _LANGGRAPH_GENERIC_NAME, default}
 
-    # langgraph_node is per-node and more specific than agent_name which
-    # is per-graph (inherited by all children).  Prefer the node name so
-    # that individual workflow steps get distinct span names.
+    # callback_kwargs["name"] is set explicitly by the caller (e.g.
+    # LangGraph node invocation) and is the most specific signal.
+    cb_name = callback_kwargs.get("name")
+    if cb_name and str(cb_name).strip() not in generic_markers:
+        return str(cb_name)
+
+    # langgraph_node is per-node metadata and more specific than the
+    # per-graph agent_name which is inherited by all children.
     langgraph_node = metadata.get("langgraph_node")
     if langgraph_node and str(langgraph_node).strip() not in generic_markers:
         return str(langgraph_node)
@@ -696,7 +701,6 @@ def _resolve_agent_name(
     candidate = _first_non_empty(
         metadata.get("agent_name"),
         metadata.get("agent_type"),
-        callback_kwargs.get("name"),
     )
     resolved = str(candidate) if candidate else None
 
@@ -1739,10 +1743,10 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         """
         metadata = metadata or {}
         agent_hint = _first_non_empty(
+            kwargs.get("name"),
             metadata.get("langgraph_node"),
             metadata.get("agent_name"),
             metadata.get("agent_type"),
-            kwargs.get("name"),
         )
         run_key = str(run_id)
         parent_key = str(parent_run_id) if parent_run_id else None

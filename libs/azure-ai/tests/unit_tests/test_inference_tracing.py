@@ -3104,6 +3104,28 @@ def test_resolve_agent_name_langgraph_node_takes_priority_over_agent_name():
     assert result == "draft_plan"
 
 
+def test_resolve_agent_name_callback_name_takes_highest_priority():
+    """callback_kwargs['name'] is the most explicit signal and wins."""
+    result = tracing._resolve_agent_name(
+        serialized=None,
+        metadata={"agent_name": "my-agent", "langgraph_node": "draft_plan"},
+        callback_kwargs={"name": "explicit_node"},
+        default="AzureAIOpenTelemetryTracer",
+    )
+    assert result == "explicit_node"
+
+
+def test_resolve_agent_name_generic_callback_name_falls_through():
+    """A generic callback name like 'LangGraph' should fall through to node."""
+    result = tracing._resolve_agent_name(
+        serialized=None,
+        metadata={"langgraph_node": "draft_plan"},
+        callback_kwargs={"name": "LangGraph"},
+        default="AzureAIOpenTelemetryTracer",
+    )
+    assert result == "draft_plan"
+
+
 def test_resolve_agent_name_falls_back_to_agent_name_when_no_node():
     """agent_name is used when langgraph_node is absent."""
     result = tracing._resolve_agent_name(
