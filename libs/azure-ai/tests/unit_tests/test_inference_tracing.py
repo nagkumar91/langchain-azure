@@ -3093,7 +3093,8 @@ def test_start_span_attributes_survive_sampler_that_drops_constructor_attrs() ->
 # _resolve_agent_name priority tests
 # ---------------------------------------------------------------------------
 
-def test_resolve_agent_name_langgraph_node_takes_priority_over_agent_name():
+
+def test_resolve_agent_name_langgraph_node_takes_priority_over_agent_name() -> None:
     """langgraph_node is per-node and should beat per-graph agent_name."""
     result = tracing._resolve_agent_name(
         serialized=None,
@@ -3104,7 +3105,7 @@ def test_resolve_agent_name_langgraph_node_takes_priority_over_agent_name():
     assert result == "draft_plan"
 
 
-def test_resolve_agent_name_callback_name_takes_highest_priority():
+def test_resolve_agent_name_callback_name_takes_highest_priority() -> None:
     """callback_kwargs['name'] is the most explicit signal and wins."""
     result = tracing._resolve_agent_name(
         serialized=None,
@@ -3115,7 +3116,7 @@ def test_resolve_agent_name_callback_name_takes_highest_priority():
     assert result == "explicit_node"
 
 
-def test_resolve_agent_name_generic_callback_name_falls_through():
+def test_resolve_agent_name_generic_callback_name_falls_through() -> None:
     """A generic callback name like 'LangGraph' should fall through to node."""
     result = tracing._resolve_agent_name(
         serialized=None,
@@ -3126,7 +3127,7 @@ def test_resolve_agent_name_generic_callback_name_falls_through():
     assert result == "draft_plan"
 
 
-def test_resolve_agent_name_falls_back_to_agent_name_when_no_node():
+def test_resolve_agent_name_falls_back_to_agent_name_when_no_node() -> None:
     """agent_name is used when langgraph_node is absent."""
     result = tracing._resolve_agent_name(
         serialized=None,
@@ -3137,7 +3138,7 @@ def test_resolve_agent_name_falls_back_to_agent_name_when_no_node():
     assert result == "my-agent"
 
 
-def test_resolve_agent_name_generic_langgraph_node_falls_through():
+def test_resolve_agent_name_generic_langgraph_node_falls_through() -> None:
     """A generic LangGraph node name like 'LangGraph' should fall through."""
     result = tracing._resolve_agent_name(
         serialized=None,
@@ -3151,7 +3152,7 @@ def test_resolve_agent_name_generic_langgraph_node_falls_through():
     assert result == "my-agent"
 
 
-def test_resolve_agent_name_default_marker_falls_through():
+def test_resolve_agent_name_default_marker_falls_through() -> None:
     """If langgraph_node equals the default, it should fall through."""
     result = tracing._resolve_agent_name(
         serialized=None,
@@ -3165,7 +3166,7 @@ def test_resolve_agent_name_default_marker_falls_through():
     assert result == "my-agent"
 
 
-def test_resolve_agent_name_both_absent_uses_default():
+def test_resolve_agent_name_both_absent_uses_default() -> None:
     """Falls back to default when both agent_name and node are absent."""
     result = tracing._resolve_agent_name(
         serialized=None,
