@@ -1,6 +1,6 @@
 [project]
 name = "langchain-azure-ai"
-version = "1.2.0"
+version = "1.2.1"
 description = "An integration package to support Azure AI Foundry capabilities in LangChain/LangGraph ecosystem."
 license = { file = "LICENSE" }
 readme = "README.md"
@@ -168,7 +168,7 @@ select = ["E", "F", "I", "D"]
 convention = "google"
 
 [tool.uv]
-constraint-dependencies = ["urllib3>=2.6.3", "cryptography>=46.0.5", "aiohttp>=3.13.3", "langgraph-checkpoint>=4.0.0", "pyjwt>=2.12.0"]
+constraint-dependencies = ["urllib3>=2.6.3", "cryptography>=46.0.6", "aiohttp>=3.13.3", "langgraph-checkpoint>=4.0.0", "pyjwt>=2.12.0"]
 default-groups = ["typing"]
 
 [dependency-groups]
