@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from langchain_azure_ai.callbacks.tracers.auto_instrument import (
-        AzureAILangChainInstrumentor,
+        AzureAIOpenTelemetryInstrumentor,
         disable_auto_tracing,
         enable_auto_tracing,
         is_auto_tracing_enabled,
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     )
 
 __all__ = [
-    "AzureAILangChainInstrumentor",
+    "AzureAIOpenTelemetryInstrumentor",
     "AzureAIOpenTelemetryTracer",
     "disable_auto_tracing",
     "enable_auto_tracing",
@@ -23,7 +23,7 @@ __all__ = [
 ]
 
 _module_lookup = {
-    "AzureAILangChainInstrumentor": (
+    "AzureAIOpenTelemetryInstrumentor": (
         "langchain_azure_ai.callbacks.tracers.auto_instrument"
     ),
     "AzureAIOpenTelemetryTracer": (

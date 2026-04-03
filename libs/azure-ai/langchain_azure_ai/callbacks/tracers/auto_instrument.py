@@ -302,7 +302,7 @@ def is_auto_tracing_enabled() -> bool:
 
 
 @experimental()
-class AzureAILangChainInstrumentor(BaseInstrumentor):
+class AzureAIOpenTelemetryInstrumentor(BaseInstrumentor):
     """OpenTelemetry instrumentor implementation for LangChain auto-tracing."""
 
     def instrumentation_dependencies(self) -> tuple[str, ...]:
@@ -320,7 +320,7 @@ class AzureAILangChainInstrumentor(BaseInstrumentor):
 
 
 __all__ = [
-    "AzureAILangChainInstrumentor",
+    "AzureAIOpenTelemetryInstrumentor",
     "disable_auto_tracing",
     "enable_auto_tracing",
     "is_auto_tracing_enabled",

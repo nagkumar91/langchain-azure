@@ -215,7 +215,7 @@ def test_env_bool_accepts_on_off_and_whitespace(
 
 
 def test_instrumentor_instrument_and_uninstrument() -> None:
-    instrumentor = auto_instrument.AzureAILangChainInstrumentor()
+    instrumentor = auto_instrument.AzureAIOpenTelemetryInstrumentor()
 
     instrumentor.instrument()
     assert auto_instrument.is_auto_tracing_enabled() is True
