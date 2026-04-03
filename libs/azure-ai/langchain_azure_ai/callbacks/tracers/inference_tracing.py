@@ -236,7 +236,12 @@ def _serialize_state(
     except Exception:  # pragma: no cover - defensive
         return None
     if len(serialized) > max_size:
-        serialized = serialized[:max_size] + "...[truncated]"
+        suffix = "...[truncated]"
+        if max_size <= 0:
+            return ""
+        if max_size <= len(suffix):
+            return suffix[:max_size]
+        serialized = serialized[: max_size - len(suffix)] + suffix
     return serialized
 
 
@@ -1290,11 +1295,13 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
 
         if message_keys is None:
             env_keys = os.getenv("OTEL_MESSAGE_KEYS")
-            message_keys = (
-                tuple(k.strip() for k in env_keys.split(",") if k.strip())
-                if env_keys
-                else ("messages",)
-            )
+            if env_keys:
+                parsed_message_keys = tuple(
+                    k.strip() for k in env_keys.split(",") if k.strip()
+                )
+                message_keys = parsed_message_keys or ("messages",)
+            else:
+                message_keys = ("messages",)
         self._message_keys = tuple(message_keys)
 
         if message_paths is None:
@@ -1316,7 +1323,18 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         self._trace_state = trace_state
 
         env_max = os.getenv("OTEL_MAX_STATE_SIZE")
-        self._max_state_size = int(env_max) if env_max else max_state_size
+        if env_max:
+            try:
+                self._max_state_size = int(env_max)
+            except ValueError:
+                LOGGER.warning(
+                    "Invalid OTEL_MAX_STATE_SIZE value %r; using max_state_size=%s",
+                    env_max,
+                    max_state_size,
+                )
+                self._max_state_size = max_state_size
+        else:
+            self._max_state_size = max_state_size
 
         if auto_configure_azure_monitor is None:
             env_val = os.getenv("OTEL_AUTO_CONFIGURE_AZURE_MONITOR", "").lower()
@@ -1358,7 +1376,9 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         )
 
         self._spans: Dict[str, _SpanRecord] = {}
-        self._lock = Lock()  # Guards _spans, _ignored_runs, _run_parent_override
+        self._lock = (
+            Lock()
+        )  # Used for selected critical sections touching tracer state.
         self._ignored_runs: set[str] = set()
         self._run_parent_override: Dict[str, Optional[str]] = {}
         self._langgraph_root_by_thread: Dict[str, str] = {}
@@ -1987,6 +2007,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                 max_size=self._max_state_size,
             )
             if state_json:
+                record.attributes[Attrs.AGENT_STATE] = state_json
                 record.span.set_attribute(Attrs.AGENT_STATE, state_json)
 
         record.span.set_status(Status(status_code=StatusCode.OK))

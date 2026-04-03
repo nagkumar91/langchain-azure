@@ -2217,6 +2217,15 @@ def test_message_keys_from_env_var() -> None:
     assert tracer._message_keys == ("chat_history", "messages")
 
 
+def test_message_keys_empty_env_var_falls_back_to_default() -> None:
+    """Empty OTEL_MESSAGE_KEYS values fall back to the default key."""
+    with patch.dict(os.environ, {"OTEL_MESSAGE_KEYS": " , , "}):
+        tracer = tracing.AzureAIOpenTelemetryTracer(
+            auto_configure_azure_monitor=False,
+        )
+    assert tracer._message_keys == ("messages",)
+
+
 def test_message_paths_from_env_var() -> None:
     """OTEL_MESSAGE_PATHS env var is used when message_paths is not passed."""
     with patch.dict(os.environ, {"OTEL_MESSAGE_PATHS": "state.messages,payload.msgs"}):
@@ -2272,6 +2281,29 @@ def test_max_state_size_env_var() -> None:
     assert tracer._max_state_size == 1024
 
 
+def test_max_state_size_invalid_env_var_falls_back_to_constructor_value() -> None:
+    """Invalid OTEL_MAX_STATE_SIZE values fall back to the provided default."""
+    with patch.dict(os.environ, {"OTEL_MAX_STATE_SIZE": "invalid"}):
+        with patch.object(tracing.LOGGER, "warning") as mock_warning:
+            tracer = tracing.AzureAIOpenTelemetryTracer(
+                max_state_size=512,
+                auto_configure_azure_monitor=False,
+            )
+    assert tracer._max_state_size == 512
+    mock_warning.assert_called_once()
+
+
+def test_serialize_state_honors_small_max_size() -> None:
+    """Serialized state never exceeds max_size, even when the suffix is longer."""
+    serialized = tracing._serialize_state(
+        {"data": "x" * 100},
+        record_content=True,
+        max_size=5,
+    )
+    assert serialized is not None
+    assert len(serialized) == 5
+
+
 def test_serialize_state_records_on_agent_span() -> None:
     """When trace_state=True, gen_ai.agent.state is set on chain spans."""
     tracer = tracing.AzureAIOpenTelemetryTracer(
@@ -2295,6 +2327,33 @@ def test_serialize_state_records_on_agent_span() -> None:
     assert '"plan"' in state_val
     assert '"step": 1' in state_val
     tracer.on_chain_end({"result": "done"}, run_id=run_id)
+
+
+def test_serialize_state_updates_record_attributes_on_chain_end() -> None:
+    """Chain-end state updates stay in sync on the span and the record cache."""
+    tracer = tracing.AzureAIOpenTelemetryTracer(
+        trace_state=True,
+        auto_configure_azure_monitor=False,
+        enable_content_recording=True,
+        trace_all_langgraph_nodes=True,
+    )
+    run_id = uuid4()
+    tracer.on_chain_start(
+        serialized={"id": ["test"]},
+        inputs={"messages": [], "plan": {"step": 1}},
+        run_id=run_id,
+        metadata={"langgraph_node": "planner", "otel_trace": True},
+    )
+
+    with patch.object(tracer, "_end_span") as mock_end_span:
+        tracer.on_chain_end({"messages": [], "plan": {"step": 2}}, run_id=run_id)
+
+    record = tracer._spans.get(str(run_id))
+    assert record is not None
+    state_val = record.attributes["gen_ai.agent.state"]
+    assert '"step": 2' in state_val
+    assert record.span.attributes["gen_ai.agent.state"] == state_val
+    mock_end_span.assert_called_once_with(run_id)
 
 
 def test_serialize_state_redacts_when_content_recording_off() -> None:
@@ -2343,7 +2402,7 @@ def test_serialize_state_truncates_large_state() -> None:
     assert record is not None
     state_val = record.attributes["gen_ai.agent.state"]
     assert state_val.endswith("...[truncated]")
-    assert len(state_val) < 200
+    assert len(state_val) <= 50
     tracer.on_chain_end({}, run_id=run_id)
 
 

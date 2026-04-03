@@ -178,6 +178,18 @@ def test_env_var_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     assert tracer._default_agent_id == "test-agent"  # type: ignore[attr-defined]
 
 
+def test_env_bool_accepts_on_off_and_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTO_BOOL_TRUE", " On ")
+    monkeypatch.setenv("AUTO_BOOL_FALSE", " off ")
+    monkeypatch.setenv("AUTO_BOOL_DEFAULT", " maybe ")
+
+    assert auto_instrument._env_bool("AUTO_BOOL_TRUE", False) is True
+    assert auto_instrument._env_bool("AUTO_BOOL_FALSE", True) is False
+    assert auto_instrument._env_bool("AUTO_BOOL_DEFAULT", True) is True
+
+
 def test_instrumentor_instrument_and_uninstrument() -> None:
     instrumentor = auto_instrument.AzureAILangChainInstrumentor()
 

@@ -105,10 +105,10 @@ class _BaseCallbackManagerInitWrapper:
 
 def _env_bool(key: str, default: bool) -> bool:
     """Read a boolean value from an environment variable."""
-    val = os.getenv(key, "").lower()
-    if val in {"1", "true", "yes"}:
+    val = os.getenv(key, "").strip().lower()
+    if val in {"1", "true", "yes", "on"}:
         return True
-    if val in {"0", "false", "no"}:
+    if val in {"0", "false", "no", "off"}:
         return False
     return default
 
