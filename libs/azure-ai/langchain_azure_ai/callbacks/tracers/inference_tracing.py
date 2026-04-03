@@ -57,6 +57,15 @@ from langchain_core.outputs import ChatGeneration, LLMResult
 
 from langchain_azure_ai.utils.utils import get_service_endpoint_from_project
 
+_TRACING_DEPENDENCY_ERROR_MESSAGE = (
+    "Azure OpenTelemetry tracing requires the packages from "
+    "'langchain-azure-ai[opentelemetry]' (including "
+    "'azure-monitor-opentelemetry', 'opentelemetry-sdk', "
+    "'opentelemetry-semantic-conventions', and "
+    "'opentelemetry-semantic-conventions-ai'). Install them via:\n"
+    "    pip install 'langchain-azure-ai[opentelemetry]'"
+)
+
 try:  # pragma: no cover - imported lazily in production environments
     from azure.monitor.opentelemetry import configure_azure_monitor
     from opentelemetry import metrics as otel_metrics
@@ -110,11 +119,7 @@ try:  # pragma: no cover - imported lazily in production environments
         set_span_in_context,
     )
 except ImportError as exc:  # pragma: no cover
-    raise ImportError(
-        "Azure OpenTelemetry tracing requires 'azure-monitor-opentelemetry' "
-        "and 'opentelemetry-sdk'. Install them via:\n"
-        "    pip install azure-monitor-opentelemetry opentelemetry-sdk"
-    ) from exc
+    raise ImportError(_TRACING_DEPENDENCY_ERROR_MESSAGE) from exc
 
 LOGGER = logging.getLogger(__name__)
 _DEBUG_THREAD_STACK = os.getenv("AZURE_TRACING_DEBUG_THREAD_STACK", "").lower() in {

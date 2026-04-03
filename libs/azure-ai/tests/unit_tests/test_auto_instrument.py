@@ -1,10 +1,17 @@
 import importlib
 import threading
+import warnings
 from types import SimpleNamespace
 from typing import Any, Iterator
 
 import pytest
 from langchain_core.callbacks import BaseCallbackManager
+
+from langchain_azure_ai._api.base import ExperimentalWarning
+
+pytestmark = pytest.mark.filterwarnings(
+    "ignore::langchain_azure_ai._api.base.ExperimentalWarning"
+)
 
 # Skip tests cleanly if required deps or the target module are not present.
 pytest.importorskip("azure.monitor.opentelemetry")
@@ -119,6 +126,23 @@ def test_disable_auto_tracing_restores_original() -> None:
     manager = BaseCallbackManager(handlers=[])
 
     assert _get_inheritable_tracers(manager) == []
+
+
+def test_disable_auto_tracing_emits_experimental_warning() -> None:
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ExperimentalWarning)
+        auto_instrument.disable_auto_tracing()
+
+    experimental_warnings = [
+        warning
+        for warning in caught
+        if issubclass(warning.category, ExperimentalWarning)
+    ]
+    assert experimental_warnings
+    assert (
+        "disable_auto_tracing is currently in preview and is subject to change"
+        in str(experimental_warnings[0].message)
+    )
 
 
 def test_deduplication_no_double_injection() -> None:

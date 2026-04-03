@@ -138,9 +138,9 @@ def _load_tracer_class() -> type[AzureAIOpenTelemetryTracer]:
         )
     except ImportError as exc:
         raise ImportError(
-            "Azure auto tracing requires tracing dependencies from "
-            "'langchain_azure_ai.callbacks.tracers.inference_tracing'. "
-            "Ensure tracing extras are installed."
+            "Azure auto tracing requires the tracing dependencies from "
+            "'langchain-azure-ai[opentelemetry]'. Install them via:\n"
+            "    pip install 'langchain-azure-ai[opentelemetry]'"
         ) from exc
     return AzureAIOpenTelemetryTracer
 
@@ -281,6 +281,7 @@ def enable_auto_tracing(
         _active_tracer = tracer
 
 
+@experimental()
 def disable_auto_tracing() -> None:
     """Disable callback manager auto-tracing and restore original behavior."""
     global _active_tracer
