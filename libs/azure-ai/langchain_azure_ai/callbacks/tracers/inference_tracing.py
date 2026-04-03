@@ -65,6 +65,7 @@ _TRACING_DEPENDENCY_ERROR_MESSAGE = (
     "'opentelemetry-semantic-conventions-ai'). Install them via:\n"
     "    pip install 'langchain-azure-ai[opentelemetry]'"
 )
+_DEFAULT_MAX_STATE_SIZE = 32768
 
 try:  # pragma: no cover - imported lazily in production environments
     from azure.monitor.opentelemetry import configure_azure_monitor
@@ -1253,7 +1254,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         compat_create_agent_filtering: bool = True,
         auto_configure_azure_monitor: Optional[bool] = None,
         trace_state: Optional[bool] = None,
-        max_state_size: int = 32768,
+        max_state_size: Optional[int] = None,
         _prepare_messages_fn: Optional[
             Callable[..., tuple[Optional[str], Optional[str]]]
         ] = None,
@@ -1327,19 +1328,20 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             trace_state = env_val in {"1", "true", "yes", "on"}
         self._trace_state = trace_state
 
-        env_max = os.getenv("OTEL_MAX_STATE_SIZE")
-        if env_max:
-            try:
-                self._max_state_size = int(env_max)
-            except ValueError:
-                LOGGER.warning(
-                    "Invalid OTEL_MAX_STATE_SIZE value %r; using max_state_size=%s",
-                    env_max,
-                    max_state_size,
-                )
-                self._max_state_size = max_state_size
-        else:
-            self._max_state_size = max_state_size
+        resolved_max_state_size = max_state_size
+        if resolved_max_state_size is None:
+            resolved_max_state_size = _DEFAULT_MAX_STATE_SIZE
+            env_max = os.getenv("OTEL_MAX_STATE_SIZE")
+            if env_max:
+                try:
+                    resolved_max_state_size = int(env_max)
+                except ValueError:
+                    LOGGER.warning(
+                        "Invalid OTEL_MAX_STATE_SIZE value %r; using max_state_size=%s",
+                        env_max,
+                        resolved_max_state_size,
+                    )
+        self._max_state_size = resolved_max_state_size
 
         if auto_configure_azure_monitor is None:
             env_val = os.getenv("OTEL_AUTO_CONFIGURE_AZURE_MONITOR", "").lower()

@@ -2273,7 +2273,7 @@ def test_trace_state_constructor_overrides_env() -> None:
 
 
 def test_max_state_size_env_var() -> None:
-    """OTEL_MAX_STATE_SIZE env var overrides default."""
+    """OTEL_MAX_STATE_SIZE env var applies when constructor arg is omitted."""
     with patch.dict(os.environ, {"OTEL_MAX_STATE_SIZE": "1024"}):
         tracer = tracing.AzureAIOpenTelemetryTracer(
             auto_configure_azure_monitor=False,
@@ -2281,8 +2281,18 @@ def test_max_state_size_env_var() -> None:
     assert tracer._max_state_size == 1024
 
 
-def test_max_state_size_invalid_env_var_falls_back_to_constructor_value() -> None:
-    """Invalid OTEL_MAX_STATE_SIZE values fall back to the provided default."""
+def test_max_state_size_constructor_value_takes_precedence_over_env_var() -> None:
+    """Explicit max_state_size should not be overridden by OTEL_MAX_STATE_SIZE."""
+    with patch.dict(os.environ, {"OTEL_MAX_STATE_SIZE": "1024"}):
+        tracer = tracing.AzureAIOpenTelemetryTracer(
+            max_state_size=512,
+            auto_configure_azure_monitor=False,
+        )
+    assert tracer._max_state_size == 512
+
+
+def test_max_state_size_constructor_value_ignores_invalid_env_var() -> None:
+    """Explicit max_state_size should ignore invalid OTEL_MAX_STATE_SIZE values."""
     with patch.dict(os.environ, {"OTEL_MAX_STATE_SIZE": "invalid"}):
         with patch.object(tracing.LOGGER, "warning") as mock_warning:
             tracer = tracing.AzureAIOpenTelemetryTracer(
@@ -2290,7 +2300,22 @@ def test_max_state_size_invalid_env_var_falls_back_to_constructor_value() -> Non
                 auto_configure_azure_monitor=False,
             )
     assert tracer._max_state_size == 512
-    mock_warning.assert_called_once()
+    mock_warning.assert_not_called()
+
+
+def test_max_state_size_invalid_env_var_falls_back_to_default_when_omitted() -> None:
+    """Invalid OTEL_MAX_STATE_SIZE falls back to the built-in default."""
+    with patch.dict(os.environ, {"OTEL_MAX_STATE_SIZE": "invalid"}):
+        with patch.object(tracing.LOGGER, "warning") as mock_warning:
+            tracer = tracing.AzureAIOpenTelemetryTracer(
+                auto_configure_azure_monitor=False,
+            )
+    assert tracer._max_state_size == tracing._DEFAULT_MAX_STATE_SIZE
+    mock_warning.assert_called_once_with(
+        "Invalid OTEL_MAX_STATE_SIZE value %r; using max_state_size=%s",
+        "invalid",
+        tracing._DEFAULT_MAX_STATE_SIZE,
+    )
 
 
 def test_serialize_state_honors_small_max_size() -> None:
