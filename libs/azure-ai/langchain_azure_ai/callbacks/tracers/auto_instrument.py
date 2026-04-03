@@ -197,7 +197,8 @@ def enable_auto_tracing(
         credential: Azure credential used with project endpoint resolution.
         provider_name: Default provider name for emitted GenAI spans.
         agent_id: Default agent identifier for emitted spans.
-        trace_all_langgraph_nodes: Whether to trace all LangGraph nodes.
+        trace_all_langgraph_nodes: Whether to trace all LangGraph nodes
+            (default ``True``).
         message_keys: State keys that hold messages (e.g. ``["messages"]``).
         message_paths: Dotted paths for nested message locations.
         auto_configure_azure_monitor: Set to ``False`` to skip automatic
@@ -237,7 +238,7 @@ def enable_auto_tracing(
             resolved_trace_all_langgraph_nodes = (
                 trace_all_langgraph_nodes
                 if trace_all_langgraph_nodes is not None
-                else _env_bool(_ENV_TRACE_ALL_LANGGRAPH_NODES, False)
+                else _env_bool(_ENV_TRACE_ALL_LANGGRAPH_NODES, True)
             )
             resolved_auto_configure = (
                 auto_configure_azure_monitor
