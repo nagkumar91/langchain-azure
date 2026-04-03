@@ -2452,6 +2452,34 @@ def test_trace_state_false_does_not_record() -> None:
     tracer.on_chain_end({}, run_id=run_id)
 
 
+def test_trace_all_langgraph_nodes_preserves_explicit_parent_nesting() -> None:
+    """Auto-promoted LangGraph node spans should keep their explicit parent."""
+    tracer = tracing.AzureAIOpenTelemetryTracer(
+        auto_configure_azure_monitor=False,
+        trace_all_langgraph_nodes=True,
+    )
+    planner_run = uuid4()
+    tracer.on_chain_start(
+        serialized={"id": ["test"]},
+        inputs={"messages": []},
+        run_id=planner_run,
+        metadata={"langgraph_node": "planner", "thread_id": "t1", "otel_trace": True},
+    )
+
+    worker_run = uuid4()
+    tracer.on_chain_start(
+        serialized={"id": ["test"]},
+        inputs={"messages": []},
+        run_id=worker_run,
+        parent_run_id=planner_run,
+        metadata={"langgraph_node": "worker", "thread_id": "t1", "otel_trace": True},
+    )
+
+    worker_record = tracer._spans.get(str(worker_run))
+    assert worker_record is not None
+    assert worker_record.parent_run_id == str(planner_run)
+
+
 def test_configure_disables_http_instrumentors(
     reset_global_tracer_provider: None,
 ) -> None:

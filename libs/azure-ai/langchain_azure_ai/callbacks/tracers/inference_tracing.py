@@ -1859,9 +1859,8 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             or _extract_trace_headers(inputs)
             or _extract_trace_headers(kwargs)
         )
-        is_agent_span = bool(
-            metadata.get("otel_agent_span") or self._trace_all_langgraph_nodes
-        )
+        is_explicit_agent_span = bool(metadata.get("otel_agent_span"))
+        is_agent_span = is_explicit_agent_span or self._trace_all_langgraph_nodes
         resolved_parent = self._resolve_parent_id(parent_run_id)
         parent_record = self._spans.get(resolved_parent) if resolved_parent else None
         if is_agent_span and trace_headers is None:
@@ -1886,7 +1885,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         effective_parent_run_id = parent_run_id
         original_resolved_parent = resolved_parent
         if (
-            is_agent_span
+            is_explicit_agent_span
             and parent_record
             and parent_record.operation == "invoke_agent"
             and parent_record.parent_run_id is None
