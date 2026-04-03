@@ -2352,7 +2352,8 @@ def test_serialize_state_updates_record_attributes_on_chain_end() -> None:
     assert record is not None
     state_val = record.attributes["gen_ai.agent.state"]
     assert '"step": 2' in state_val
-    assert record.span.attributes["gen_ai.agent.state"] == state_val
+    span = cast(MockSpan, record.span)
+    assert span.attributes["gen_ai.agent.state"] == state_val
     mock_end_span.assert_called_once_with(run_id)
 
 
