@@ -10,6 +10,9 @@ from langchain_azure_ai._resources import AIServicesService
 if TYPE_CHECKING:
     from langchain_azure_ai.tools.image_gen import OpenAIModelImageGenTool
     from langchain_azure_ai.tools.logic_apps import AzureLogicAppTool
+    from langchain_azure_ai.tools.services.content_understanding import (
+        AzureAIContentUnderstandingTool,
+    )
     from langchain_azure_ai.tools.services.document_intelligence import (
         AzureAIDocumentIntelligenceTool,
     )
@@ -22,6 +25,9 @@ if TYPE_CHECKING:
 
 # Mapping of lazy-loaded symbol names to their module paths
 _MODULE_MAP = {
+    "AzureAIContentUnderstandingTool": (
+        "langchain_azure_ai.tools.services.content_understanding"
+    ),
     "AzureAIDocumentIntelligenceTool": (
         "langchain_azure_ai.tools.services.document_intelligence"
     ),
@@ -32,6 +38,10 @@ _MODULE_MAP = {
     "OpenAIModelImageGenTool": "langchain_azure_ai.tools.image_gen",
     "AzureLogicAppTool": "langchain_azure_ai.tools.logic_apps",
 }
+
+# Re-export the builtin subpackage so ``from langchain_azure_ai.tools import builtin``
+# works without an explicit import.
+from langchain_azure_ai.tools import builtin as builtin  # noqa: E402
 
 
 def __getattr__(name: str) -> Any:
@@ -46,6 +56,9 @@ class AIServicesToolkit(BaseToolkit, AIServicesService):
 
     def get_tools(self) -> List[BaseTool]:
         """Get the tools in the toolkit."""
+        from langchain_azure_ai.tools.services.content_understanding import (
+            AzureAIContentUnderstandingTool,
+        )
         from langchain_azure_ai.tools.services.document_intelligence import (
             AzureAIDocumentIntelligenceTool,
         )
@@ -57,6 +70,11 @@ class AIServicesToolkit(BaseToolkit, AIServicesService):
         )
 
         return [
+            AzureAIContentUnderstandingTool(
+                endpoint=self.endpoint,
+                credential=self.credential,
+                api_version=self.api_version,
+            ),
             AzureAIDocumentIntelligenceTool(
                 endpoint=self.endpoint,
                 credential=self.credential,
@@ -76,6 +94,7 @@ class AIServicesToolkit(BaseToolkit, AIServicesService):
 
 
 __all__ = [
+    "AzureAIContentUnderstandingTool",
     "AzureAIDocumentIntelligenceTool",
     "AzureAIImageAnalysisTool",
     "AzureAITextAnalyticsHealthTool",
