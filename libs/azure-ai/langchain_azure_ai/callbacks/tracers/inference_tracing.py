@@ -3129,15 +3129,16 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
         # correct trace/span.
         emitted_via_logs = False
         try:
+            import opentelemetry.trace as _otrace
             from opentelemetry import context as _otel_ctx
             from opentelemetry._logs import get_logger_provider
-            import opentelemetry.trace as _otrace
 
             logger_provider = get_logger_provider()
             # Only use Logs API if a real SDK LoggerProvider is configured
             # (not the default no-op proxy)
             try:
                 from opentelemetry.sdk._logs import LoggerProvider as _SdkLP
+
                 _is_real_provider = isinstance(logger_provider, _SdkLP)
             except ImportError:
                 _is_real_provider = False

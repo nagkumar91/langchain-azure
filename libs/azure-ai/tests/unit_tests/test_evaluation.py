@@ -505,17 +505,18 @@ class TestTracerEvalEvent:
 
         mock_otel_logger = MagicMock()
 
+        from opentelemetry._logs import get_logger_provider, set_logger_provider
         from opentelemetry._logs._internal import _LOGGER_PROVIDER_SET_ONCE
-        from opentelemetry._logs import set_logger_provider, get_logger_provider
         from opentelemetry.sdk._logs import LoggerProvider as SdkLP
 
         original_done = _LOGGER_PROVIDER_SET_ONCE._done
         original_provider = get_logger_provider()
 
         class _TestLP(SdkLP):
-            def __init__(self):
+            def __init__(self) -> None:
                 pass
-            def get_logger(self, *a, **kw):
+
+            def get_logger(self, *a: Any, **kw: Any) -> Any:
                 return mock_otel_logger
 
         _LOGGER_PROVIDER_SET_ONCE._done = False
@@ -612,17 +613,18 @@ class TestTracerEvalEvent:
 
         mock_otel_logger = MagicMock()
 
+        from opentelemetry._logs import get_logger_provider, set_logger_provider
         from opentelemetry._logs._internal import _LOGGER_PROVIDER_SET_ONCE
-        from opentelemetry._logs import set_logger_provider, get_logger_provider
         from opentelemetry.sdk._logs import LoggerProvider as SdkLP
 
         original_done = _LOGGER_PROVIDER_SET_ONCE._done
         original_provider = get_logger_provider()
 
         class _TestLP(SdkLP):
-            def __init__(self):
+            def __init__(self) -> None:
                 pass
-            def get_logger(self, *a, **kw):
+
+            def get_logger(self, *a: Any, **kw: Any) -> Any:
                 return mock_otel_logger
 
         _LOGGER_PROVIDER_SET_ONCE._done = False
