@@ -493,44 +493,46 @@ class TestTracerEvalEvent:
         emit_evaluation_event should use it instead of span.add_event()."""
         tracer = self._make_tracer()
 
-        mock_span = MagicMock()
+        from opentelemetry.sdk._logs import LoggerProvider as SdkLP
+        from opentelemetry.sdk.trace import TracerProvider
+
+        tracer_provider = TracerProvider()
+        test_span = tracer_provider.get_tracer(__name__).start_span("emit-evaluation")
         from langchain_azure_ai.callbacks.tracers.inference_tracing import (
             Attrs,
             _SpanRecord,
         )
 
         tracer._spans["r1"] = _SpanRecord(
-            run_id="r1", span=mock_span, operation="invoke_agent", parent_run_id=None
+            run_id="r1",
+            span=test_span,
+            operation="invoke_agent",
+            parent_run_id=None,
         )
 
         mock_otel_logger = MagicMock()
-
-        from opentelemetry._logs import get_logger_provider, set_logger_provider
-        from opentelemetry._logs._internal import _LOGGER_PROVIDER_SET_ONCE
-        from opentelemetry.sdk._logs import LoggerProvider as SdkLP
-
-        original_done = _LOGGER_PROVIDER_SET_ONCE._done
-        original_provider = get_logger_provider()
-
-        class _TestLP(SdkLP):
-            def __init__(self) -> None:
-                pass
-
-            def get_logger(self, *a: Any, **kw: Any) -> Any:
-                return mock_otel_logger
-
-        _LOGGER_PROVIDER_SET_ONCE._done = False
-        set_logger_provider(_TestLP())
+        logger_provider = SdkLP()
         try:
-            tracer.emit_evaluation_event(
-                evaluation_name="quality",
-                score_value=4.0,
-                score_label="pass",
-            )
+            with (
+                patch(
+                    "opentelemetry._logs.get_logger_provider",
+                    return_value=logger_provider,
+                ),
+                patch.object(
+                    logger_provider,
+                    "get_logger",
+                    return_value=mock_otel_logger,
+                ),
+                patch.object(test_span, "add_event") as mock_add_event,
+            ):
+                tracer.emit_evaluation_event(
+                    evaluation_name="quality",
+                    score_value=4.0,
+                    score_label="pass",
+                )
+                mock_add_event.assert_not_called()
         finally:
-            _LOGGER_PROVIDER_SET_ONCE._done = False
-            set_logger_provider(original_provider)
-            _LOGGER_PROVIDER_SET_ONCE._done = original_done
+            test_span.end()
 
         mock_otel_logger.emit.assert_called_once()
         call_kwargs = mock_otel_logger.emit.call_args[1]
@@ -542,7 +544,6 @@ class TestTracerEvalEvent:
         )
         assert call_kwargs["attributes"][Attrs.EVALUATION_NAME] == "quality"
         assert call_kwargs["attributes"][Attrs.EVALUATION_SCORE_VALUE] == 4.0
-        mock_span.add_event.assert_not_called()
 
     def test_emit_with_explicit_run_id(self) -> None:
         tracer = self._make_tracer()
@@ -609,43 +610,54 @@ class TestTracerEvalEvent:
         so the log record is parented to the correct trace/span."""
         tracer = self._make_tracer()
 
-        mock_span = MagicMock()
+        from opentelemetry import trace as otel_trace
+        from opentelemetry.sdk._logs import LoggerProvider as SdkLP
+        from opentelemetry.sdk.trace import TracerProvider
+
+        tracer_provider = TracerProvider()
+        test_span = tracer_provider.get_tracer(__name__).start_span(
+            "emit-evaluation-context"
+        )
         from langchain_azure_ai.callbacks.tracers.inference_tracing import (
             Attrs,
             _SpanRecord,
         )
 
         tracer._spans["r1"] = _SpanRecord(
-            run_id="r1", span=mock_span, operation="invoke_agent", parent_run_id=None
+            run_id="r1",
+            span=test_span,
+            operation="invoke_agent",
+            parent_run_id=None,
         )
 
         mock_otel_logger = MagicMock()
+        logger_provider = SdkLP()
+        observed_spans: list[Any] = []
 
-        from opentelemetry._logs import get_logger_provider, set_logger_provider
-        from opentelemetry._logs._internal import _LOGGER_PROVIDER_SET_ONCE
-        from opentelemetry.sdk._logs import LoggerProvider as SdkLP
+        def _capture_current_span(*_: Any, **__: Any) -> None:
+            observed_spans.append(otel_trace.get_current_span())
 
-        original_done = _LOGGER_PROVIDER_SET_ONCE._done
-        original_provider = get_logger_provider()
-
-        class _TestLP(SdkLP):
-            def __init__(self) -> None:
-                pass
-
-            def get_logger(self, *a: Any, **kw: Any) -> Any:
-                return mock_otel_logger
-
-        _LOGGER_PROVIDER_SET_ONCE._done = False
-        set_logger_provider(_TestLP())
+        mock_otel_logger.emit.side_effect = _capture_current_span
         try:
-            tracer.emit_evaluation_event(
-                evaluation_name="test",
-                score_value=5.0,
-            )
+            with (
+                patch(
+                    "opentelemetry._logs.get_logger_provider",
+                    return_value=logger_provider,
+                ),
+                patch.object(
+                    logger_provider,
+                    "get_logger",
+                    return_value=mock_otel_logger,
+                ),
+                patch.object(test_span, "add_event") as mock_add_event,
+            ):
+                tracer.emit_evaluation_event(
+                    evaluation_name="test",
+                    score_value=5.0,
+                )
+                mock_add_event.assert_not_called()
         finally:
-            _LOGGER_PROVIDER_SET_ONCE._done = False
-            set_logger_provider(original_provider)
-            _LOGGER_PROVIDER_SET_ONCE._done = original_done
+            test_span.end()
 
         mock_otel_logger.emit.assert_called_once()
         call_kwargs = mock_otel_logger.emit.call_args[1]
@@ -654,7 +666,7 @@ class TestTracerEvalEvent:
             call_kwargs["attributes"][Attrs.AZURE_MONITOR_CUSTOM_EVENT_NAME]
             == Attrs.EVALUATION_RESULT_EVENT
         )
-        mock_span.add_event.assert_not_called()
+        assert observed_spans == [test_span]
 
 
 # ============================================================

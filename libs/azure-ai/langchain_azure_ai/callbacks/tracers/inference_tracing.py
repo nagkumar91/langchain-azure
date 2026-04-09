@@ -24,6 +24,7 @@ to instrument your applications.
 
 from __future__ import annotations
 
+import importlib.metadata
 import json
 import logging
 import os
@@ -66,6 +67,11 @@ _TRACING_DEPENDENCY_ERROR_MESSAGE = (
     "    pip install 'langchain-azure-ai[opentelemetry]'"
 )
 _DEFAULT_MAX_STATE_SIZE = 32768
+_PACKAGE_NAME = "langchain-azure-ai"
+try:
+    _PACKAGE_VERSION = importlib.metadata.version(_PACKAGE_NAME)
+except importlib.metadata.PackageNotFoundError:
+    _PACKAGE_VERSION = "0.0.0"
 
 try:  # pragma: no cover - imported lazily in production environments
     from azure.monitor.opentelemetry import configure_azure_monitor
@@ -3148,7 +3154,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             if _is_real_provider:
                 otel_logger = logger_provider.get_logger(
                     "gen_ai.evaluation",
-                    version="1.0.0",
+                    version=_PACKAGE_VERSION,
                 )
                 log_attributes = dict(attributes)
                 log_attributes[Attrs.AZURE_MONITOR_CUSTOM_EVENT_NAME] = (
