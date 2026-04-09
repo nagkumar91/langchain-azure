@@ -208,6 +208,7 @@ class Attrs:
     EVALUATION_EXPLANATION = "gen_ai.evaluation.explanation"
     EVALUATION_RESULT_EVENT = "gen_ai.evaluation.result"
     AGENT_STATE = "gen_ai.agent.state"
+    AZURE_MONITOR_CUSTOM_EVENT_NAME = "microsoft.custom_event.name"
 
     # Optional vendor-specific attributes
     OPENAI_REQUEST_SERVICE_TIER = "openai.request.service_tier"
@@ -3124,9 +3125,10 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             attributes[Attrs.ERROR_TYPE] = error_type
 
         # Preferred path: emit via OTel Logs/Events API so the event
-        # lands in the customEvents table in Azure Monitor.  The span's
-        # context is activated so the log record is correlated to the
-        # correct trace/span.
+        # lands in the customEvents table in Azure Monitor when an SDK
+        # LoggerProvider/exporter is configured. The span's context is
+        # activated so the log record is correlated to the correct
+        # trace/span.
         emitted_via_logs = False
         try:
             import opentelemetry.trace as _otrace
@@ -3148,13 +3150,18 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
                     "gen_ai.evaluation",
                     version="1.0.0",
                 )
+                log_attributes = dict(attributes)
+                log_attributes[Attrs.AZURE_MONITOR_CUSTOM_EVENT_NAME] = (
+                    Attrs.EVALUATION_RESULT_EVENT
+                )
                 # Activate the target span's context for correct parenting
                 ctx = _otrace.set_span_in_context(span)
                 token = _otel_ctx.attach(ctx)
                 try:
                     otel_logger.emit(
                         body=Attrs.EVALUATION_RESULT_EVENT,
-                        attributes=attributes,
+                        attributes=log_attributes,
+                        event_name=Attrs.EVALUATION_RESULT_EVENT,
                     )
                     emitted_via_logs = True
                 finally:

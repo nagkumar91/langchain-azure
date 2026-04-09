@@ -535,6 +535,11 @@ class TestTracerEvalEvent:
         mock_otel_logger.emit.assert_called_once()
         call_kwargs = mock_otel_logger.emit.call_args[1]
         assert call_kwargs["body"] == Attrs.EVALUATION_RESULT_EVENT
+        assert call_kwargs["event_name"] == Attrs.EVALUATION_RESULT_EVENT
+        assert (
+            call_kwargs["attributes"][Attrs.AZURE_MONITOR_CUSTOM_EVENT_NAME]
+            == Attrs.EVALUATION_RESULT_EVENT
+        )
         assert call_kwargs["attributes"][Attrs.EVALUATION_NAME] == "quality"
         assert call_kwargs["attributes"][Attrs.EVALUATION_SCORE_VALUE] == 4.0
         mock_span.add_event.assert_not_called()
@@ -605,7 +610,10 @@ class TestTracerEvalEvent:
         tracer = self._make_tracer()
 
         mock_span = MagicMock()
-        from langchain_azure_ai.callbacks.tracers.inference_tracing import _SpanRecord
+        from langchain_azure_ai.callbacks.tracers.inference_tracing import (
+            Attrs,
+            _SpanRecord,
+        )
 
         tracer._spans["r1"] = _SpanRecord(
             run_id="r1", span=mock_span, operation="invoke_agent", parent_run_id=None
@@ -640,6 +648,12 @@ class TestTracerEvalEvent:
             _LOGGER_PROVIDER_SET_ONCE._done = original_done
 
         mock_otel_logger.emit.assert_called_once()
+        call_kwargs = mock_otel_logger.emit.call_args[1]
+        assert call_kwargs["event_name"] == Attrs.EVALUATION_RESULT_EVENT
+        assert (
+            call_kwargs["attributes"][Attrs.AZURE_MONITOR_CUSTOM_EVENT_NAME]
+            == Attrs.EVALUATION_RESULT_EVENT
+        )
         mock_span.add_event.assert_not_called()
 
 
