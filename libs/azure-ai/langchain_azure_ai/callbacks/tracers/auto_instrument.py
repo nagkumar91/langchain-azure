@@ -270,12 +270,6 @@ def enable_auto_tracing(
                 tracer_kwargs["name"] = resolved_name
             if message_keys is not None:
                 tracer_kwargs["message_keys"] = message_keys
-            else:
-                # Default to extracting messages from LangGraph state
-                env_keys = os.getenv("OTEL_MESSAGE_KEYS")
-                tracer_kwargs["message_keys"] = (
-                    env_keys.split(",") if env_keys else ["messages"]
-                )
             if message_paths is not None:
                 tracer_kwargs["message_paths"] = message_paths
             if trace_state is not None:
