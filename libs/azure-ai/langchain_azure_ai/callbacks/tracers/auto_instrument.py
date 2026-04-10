@@ -236,9 +236,9 @@ def enable_auto_tracing(
             resolved_project_endpoint = project_endpoint or os.getenv(
                 _ENV_PROJECT_ENDPOINT
             )
-            resolved_provider_name = provider_name or os.getenv(
-                _ENV_PROVIDER_NAME
-            ) or "azure_openai"
+            resolved_provider_name = (
+                provider_name or os.getenv(_ENV_PROVIDER_NAME) or "azure_openai"
+            )
             resolved_agent_id = agent_id or os.getenv(_ENV_AGENT_ID)
             resolved_trace_all_langgraph_nodes = (
                 trace_all_langgraph_nodes
