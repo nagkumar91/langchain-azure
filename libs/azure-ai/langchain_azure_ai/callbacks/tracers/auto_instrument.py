@@ -191,18 +191,21 @@ def enable_auto_tracing(
 
     Args:
         connection_string: Application Insights connection string.
-        enable_content_recording: Whether to capture message/content payloads.
+        enable_content_recording: Whether to capture message/content payloads
+            (default ``False``).
         project_endpoint: Azure AI project endpoint for connection string
             resolution.
         credential: Azure credential used with project endpoint resolution.
-        provider_name: Default provider name for emitted GenAI spans.
+        provider_name: Default provider name for emitted GenAI spans
+            (default ``"azure_openai"``).
         agent_id: Default agent identifier for emitted spans.
         trace_all_langgraph_nodes: Whether to trace all LangGraph nodes
             (default ``True``).
-        message_keys: State keys that hold messages (e.g. ``["messages"]``).
+        message_keys: State keys that hold messages (default ``["messages"]``).
         message_paths: Dotted paths for nested message locations.
-        auto_configure_azure_monitor: Set to ``False`` to skip automatic
-            Azure Monitor configuration.
+        auto_configure_azure_monitor: Set to ``True`` to enable automatic
+            Azure Monitor configuration (default ``False``; hosted agents
+            configure their own ``TracerProvider``).
         trace_state: Whether to capture the full LangGraph state on each
             agent node span (default ``False``).
         max_state_size: Maximum character length for serialized state
@@ -228,12 +231,14 @@ def enable_auto_tracing(
             resolved_enable_content_recording = (
                 enable_content_recording
                 if enable_content_recording is not None
-                else _env_bool(_ENV_ENABLE_CONTENT_RECORDING, True)
+                else _env_bool(_ENV_ENABLE_CONTENT_RECORDING, False)
             )
             resolved_project_endpoint = project_endpoint or os.getenv(
                 _ENV_PROJECT_ENDPOINT
             )
-            resolved_provider_name = provider_name or os.getenv(_ENV_PROVIDER_NAME)
+            resolved_provider_name = provider_name or os.getenv(
+                _ENV_PROVIDER_NAME
+            ) or "azure_openai"
             resolved_agent_id = agent_id or os.getenv(_ENV_AGENT_ID)
             resolved_trace_all_langgraph_nodes = (
                 trace_all_langgraph_nodes
@@ -243,7 +248,7 @@ def enable_auto_tracing(
             resolved_auto_configure = (
                 auto_configure_azure_monitor
                 if auto_configure_azure_monitor is not None
-                else _env_bool(_ENV_AUTO_CONFIGURE_AZURE_MONITOR, True)
+                else _env_bool(_ENV_AUTO_CONFIGURE_AZURE_MONITOR, False)
             )
 
             # Derive tracer name from agent_id or OTEL_SERVICE_NAME so that
@@ -265,6 +270,12 @@ def enable_auto_tracing(
                 tracer_kwargs["name"] = resolved_name
             if message_keys is not None:
                 tracer_kwargs["message_keys"] = message_keys
+            else:
+                # Default to extracting messages from LangGraph state
+                env_keys = os.getenv("OTEL_MESSAGE_KEYS")
+                tracer_kwargs["message_keys"] = (
+                    env_keys.split(",") if env_keys else ["messages"]
+                )
             if message_paths is not None:
                 tracer_kwargs["message_paths"] = message_paths
             if trace_state is not None:
