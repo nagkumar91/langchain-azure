@@ -267,6 +267,50 @@ def test_callback_manager_factory_wrapper_injects_tracer() -> None:
     assert _get_inheritable_tracers(manager) == [tracer]
 
 
+def test_inject_tracer_fallback_on_add_handler_rejection() -> None:
+    """When add_handler rejects the tracer (TypeError), fall back to list append."""
+    tracer = tracing.AzureAIOpenTelemetryTracer(provider_name="test-provider")
+    injector = auto_instrument._CallbackManagerInjector(tracer)
+
+    class StrictManager:
+        def __init__(self) -> None:
+            self.handlers: list[Any] = []
+            self.inheritable_handlers: list[Any] = []
+
+        def add_handler(self, handler: Any, inherit: bool = False) -> None:
+            raise TypeError("handler must be a GraphCallbackHandler")
+
+    manager = StrictManager()
+    injector._inject_tracer(manager)
+    assert tracer in manager.inheritable_handlers
+
+
+def test_inject_tracer_reraises_unrelated_type_error() -> None:
+    """TypeError not related to handler rejection should propagate."""
+    tracer = tracing.AzureAIOpenTelemetryTracer(provider_name="test-provider")
+    injector = auto_instrument._CallbackManagerInjector(tracer)
+
+    class BrokenManager:
+        def __init__(self) -> None:
+            self.handlers: list[Any] = []
+            self.inheritable_handlers: list[Any] = []
+
+        def add_handler(self, handler: Any, inherit: bool = False) -> None:
+            raise TypeError("unexpected argument 'foo'")
+
+    manager = BrokenManager()
+    with pytest.raises(TypeError, match="unexpected argument"):
+        injector._inject_tracer(manager)
+
+
+def test_tracer_is_instance_of_base_callback_handler() -> None:
+    """AzureAIOpenTelemetryTracer must inherit from BaseCallbackHandler."""
+    from langchain_core.callbacks.base import BaseCallbackHandler
+
+    tracer = tracing.AzureAIOpenTelemetryTracer()
+    assert isinstance(tracer, BaseCallbackHandler)
+
+
 def test_patch_langgraph_callback_manager_helpers_wraps_async_targets(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
