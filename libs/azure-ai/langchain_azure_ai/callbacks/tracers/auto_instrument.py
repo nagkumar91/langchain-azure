@@ -113,6 +113,21 @@ def _env_bool(key: str, default: bool) -> bool:
     return default
 
 
+def _normalize_provider_name(provider_name: str | None) -> str | None:
+    """Normalize common Azure OpenAI provider aliases to the canonical value."""
+    if provider_name is None:
+        return None
+
+    normalized = provider_name.strip()
+    if not normalized:
+        return None
+
+    if normalized.lower() in {"azure", "azure_openai", "azure-openai"}:
+        return "azure.ai.openai"
+
+    return normalized
+
+
 def _ensure_wrapt_available() -> None:
     """Ensure wrapt is installed before patching callbacks."""
     if wrap_function_wrapper is None:
@@ -197,7 +212,7 @@ def enable_auto_tracing(
             resolution.
         credential: Azure credential used with project endpoint resolution.
         provider_name: Default provider name for emitted GenAI spans
-            (default ``"azure_openai"``).
+            (default ``"azure.ai.openai"``).
         agent_id: Default agent identifier for emitted spans.
         trace_all_langgraph_nodes: Whether to trace all LangGraph nodes
             (default ``True``).
@@ -205,7 +220,10 @@ def enable_auto_tracing(
         message_paths: Dotted paths for nested message locations.
         auto_configure_azure_monitor: Set to ``True`` to enable automatic
             Azure Monitor configuration (default ``False``; hosted agents
-            configure their own ``TracerProvider``).
+            configure their own ``TracerProvider``). In non-hosted usage,
+            leaving this as ``False`` means Azure Monitor is not configured
+            automatically, so spans may not export unless your application
+            configures a ``TracerProvider`` and exporter separately.
         trace_state: Whether to capture the full LangGraph state on each
             agent node span (default ``False``).
         max_state_size: Maximum character length for serialized state
@@ -237,7 +255,9 @@ def enable_auto_tracing(
                 _ENV_PROJECT_ENDPOINT
             )
             resolved_provider_name = (
-                provider_name or os.getenv(_ENV_PROVIDER_NAME) or "azure_openai"
+                _normalize_provider_name(provider_name)
+                or _normalize_provider_name(os.getenv(_ENV_PROVIDER_NAME))
+                or "azure.ai.openai"
             )
             resolved_agent_id = agent_id or os.getenv(_ENV_AGENT_ID)
             resolved_trace_all_langgraph_nodes = (

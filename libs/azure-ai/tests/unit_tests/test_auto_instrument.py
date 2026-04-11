@@ -202,6 +202,60 @@ def test_env_var_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     assert tracer._default_agent_id == "test-agent"  # type: ignore[attr-defined]
 
 
+def test_enable_auto_tracing_defaults_for_hosted_agents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for env_var in (
+        "APPLICATION_INSIGHTS_CONNECTION_STRING",
+        "AZURE_TRACING_GEN_AI_CONTENT_RECORDING_ENABLED",
+        "AZURE_TRACING_PROVIDER_NAME",
+        "AZURE_TRACING_AGENT_ID",
+        "AZURE_TRACING_ALL_LANGGRAPH_NODES",
+        "OTEL_MESSAGE_KEYS",
+        "OTEL_AUTO_CONFIGURE_AZURE_MONITOR",
+    ):
+        monkeypatch.delenv(env_var, raising=False)
+
+    monkeypatch.setenv(
+        "APPLICATION_INSIGHTS_CONNECTION_STRING",
+        "InstrumentationKey=00000000-0000-0000-0000-000000000000",
+    )
+
+    configure_calls: list[str] = []
+
+    def fake_configure(cls: type[Any], connection_string: str) -> None:
+        del cls
+        configure_calls.append(connection_string)
+
+    monkeypatch.setattr(
+        tracing.AzureAIOpenTelemetryTracer,
+        "_configure_azure_monitor",
+        classmethod(fake_configure),
+    )
+
+    auto_instrument.enable_auto_tracing()
+    manager = BaseCallbackManager(handlers=[])
+
+    tracer = _get_inheritable_tracers(manager)[0]
+    assert tracer._content_recording is False  # type: ignore[attr-defined]
+    assert tracer._default_provider_name == "azure.ai.openai"  # type: ignore[attr-defined]
+    assert tracer._message_keys == ("messages",)  # type: ignore[attr-defined]
+    assert tracer._trace_all_langgraph_nodes is True  # type: ignore[attr-defined]
+    assert configure_calls == []
+
+
+def test_enable_auto_tracing_normalizes_azure_provider_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_TRACING_PROVIDER_NAME", " azure_openai ")
+
+    auto_instrument.enable_auto_tracing()
+    manager = BaseCallbackManager(handlers=[])
+
+    tracer = _get_inheritable_tracers(manager)[0]
+    assert tracer._default_provider_name == "azure.ai.openai"  # type: ignore[attr-defined]
+
+
 def test_env_bool_accepts_on_off_and_whitespace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
