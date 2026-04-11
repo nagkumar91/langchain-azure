@@ -249,7 +249,10 @@ def _patch_langgraph_callback_manager_helpers(
 def _unpatch_langgraph_callback_manager_helpers() -> None:
     """Unpatch any LangGraph callback-manager helpers patched earlier."""
     for module_name, function_name in _patched_langgraph_targets:
-        module = _load_optional_module(module_name)
+        try:
+            module = _load_optional_module(module_name)
+        except ImportError:
+            continue
         if module is not None and hasattr(module, function_name):
             unwrap(module, function_name)
     _patched_langgraph_targets.clear()

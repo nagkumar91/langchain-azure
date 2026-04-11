@@ -333,6 +333,36 @@ def test_patch_langgraph_callback_manager_helpers_skips_import_errors(
     auto_instrument._patched_langgraph_targets.clear()
 
 
+def test_unpatch_langgraph_callback_manager_helpers_skips_import_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unwrap_calls: list[tuple[object, str]] = []
+    good_module = SimpleNamespace(get_async_callback_manager_for_config=object())
+
+    auto_instrument._patched_langgraph_targets[:] = [
+        ("langgraph.good", "get_async_callback_manager_for_config"),
+        ("langgraph.bad", "get_async_callback_manager_for_config"),
+    ]
+
+    def fake_load_optional_module(module_name: str) -> object:
+        if module_name == "langgraph.bad":
+            raise ImportError("missing optional langgraph dependency")
+        return good_module
+
+    def fake_unwrap(module: object, name: str) -> None:
+        unwrap_calls.append((module, name))
+
+    monkeypatch.setattr(
+        auto_instrument, "_load_optional_module", fake_load_optional_module
+    )
+    monkeypatch.setattr(auto_instrument, "unwrap", fake_unwrap)
+
+    auto_instrument._unpatch_langgraph_callback_manager_helpers()
+
+    assert unwrap_calls == [(good_module, "get_async_callback_manager_for_config")]
+    assert auto_instrument._patched_langgraph_targets == []
+
+
 def test_env_bool_accepts_on_off_and_whitespace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
