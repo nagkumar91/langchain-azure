@@ -292,6 +292,47 @@ def test_patch_langgraph_callback_manager_helpers_wraps_async_targets(
     auto_instrument._patched_langgraph_targets.clear()
 
 
+def test_patch_langgraph_callback_manager_helpers_skips_import_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracer = tracing.AzureAIOpenTelemetryTracer(provider_name="test-provider")
+    wrap_calls: list[tuple[str, str]] = []
+
+    monkeypatch.setattr(
+        auto_instrument,
+        "_LANGGRAPH_CALLBACK_MANAGER_TARGETS",
+        (
+            ("langgraph.good", "get_async_callback_manager_for_config"),
+            ("langgraph.bad", "get_async_callback_manager_for_config"),
+        ),
+    )
+
+    def fake_load_optional_module(module_name: str) -> object:
+        if module_name == "langgraph.bad":
+            raise ImportError("missing optional langgraph dependency")
+        return SimpleNamespace(get_async_callback_manager_for_config=object())
+
+    def fake_wrap_function_wrapper(module: str, name: str, wrapper: object) -> None:
+        del wrapper
+        wrap_calls.append((module, name))
+
+    monkeypatch.setattr(
+        auto_instrument, "_load_optional_module", fake_load_optional_module
+    )
+    monkeypatch.setattr(
+        auto_instrument, "wrap_function_wrapper", fake_wrap_function_wrapper
+    )
+    auto_instrument._patched_langgraph_targets.clear()
+
+    auto_instrument._patch_langgraph_callback_manager_helpers(tracer)
+
+    assert wrap_calls == [("langgraph.good", "get_async_callback_manager_for_config")]
+    assert auto_instrument._patched_langgraph_targets == [
+        ("langgraph.good", "get_async_callback_manager_for_config")
+    ]
+    auto_instrument._patched_langgraph_targets.clear()
+
+
 def test_env_bool_accepts_on_off_and_whitespace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -374,6 +415,52 @@ def test_enable_auto_tracing_serializes_concurrent_calls(
     assert patch_calls == {"base": 1, "langgraph": 1}
     assert auto_instrument.is_auto_tracing_enabled() is True
     monkeypatch.setattr(auto_instrument, "_active_tracer", None)
+
+
+def test_enable_auto_tracing_rolls_back_patches_on_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyTracer:
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+    cleanup_calls: list[str] = []
+
+    monkeypatch.setattr(auto_instrument, "_active_tracer", None)
+    monkeypatch.setattr(
+        auto_instrument, "_ensure_otel_instrumentation_available", lambda: None
+    )
+    monkeypatch.setattr(auto_instrument, "_ensure_wrapt_available", lambda: None)
+    monkeypatch.setattr(auto_instrument, "_load_tracer_class", lambda: DummyTracer)
+    monkeypatch.setattr(
+        auto_instrument, "_patch_base_callback_manager", lambda tracer: None
+    )
+
+    def fail_patch_langgraph_callback_manager_helpers(tracer: object) -> None:
+        del tracer
+        raise RuntimeError("langgraph patch failed")
+
+    monkeypatch.setattr(
+        auto_instrument,
+        "_patch_langgraph_callback_manager_helpers",
+        fail_patch_langgraph_callback_manager_helpers,
+    )
+    monkeypatch.setattr(
+        auto_instrument,
+        "_unpatch_base_callback_manager",
+        lambda: cleanup_calls.append("base"),
+    )
+    monkeypatch.setattr(
+        auto_instrument,
+        "_unpatch_langgraph_callback_manager_helpers",
+        lambda: cleanup_calls.append("langgraph"),
+    )
+
+    with pytest.raises(RuntimeError, match="langgraph patch failed"):
+        auto_instrument.enable_auto_tracing()
+
+    assert cleanup_calls == ["langgraph", "base"]
+    assert auto_instrument.is_auto_tracing_enabled() is False
 
 
 def test_disable_auto_tracing_uses_matching_unwrap_target(

@@ -235,7 +235,10 @@ def _patch_langgraph_callback_manager_helpers(
     factory_wrapper = _CallbackManagerFactoryWrapper(tracer)
 
     for module_name, function_name in _LANGGRAPH_CALLBACK_MANAGER_TARGETS:
-        module = _load_optional_module(module_name)
+        try:
+            module = _load_optional_module(module_name)
+        except ImportError:
+            continue
         if module is None or not hasattr(module, function_name):
             continue
 
@@ -384,8 +387,16 @@ def enable_auto_tracing(
 
             tracer = tracer_class(**tracer_kwargs)
 
-        _patch_base_callback_manager(tracer)
-        _patch_langgraph_callback_manager_helpers(tracer)
+        base_callback_manager_patched = False
+        try:
+            _patch_base_callback_manager(tracer)
+            base_callback_manager_patched = True
+            _patch_langgraph_callback_manager_helpers(tracer)
+        except Exception:
+            _unpatch_langgraph_callback_manager_helpers()
+            if base_callback_manager_patched:
+                _unpatch_base_callback_manager()
+            raise
         _active_tracer = tracer
 
 
