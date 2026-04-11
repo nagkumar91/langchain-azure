@@ -102,7 +102,15 @@ class _CallbackManagerInjector:
 
     def _inject_tracer(self, manager: Any) -> Any:
         if not self._has_existing_tracer(manager):
-            manager.add_handler(self._tracer, True)
+            try:
+                manager.add_handler(self._tracer, True)
+            except TypeError:
+                # LangGraph's _AsyncGraphCallbackManager.add_handler() rejects
+                # handlers that don't inherit from GraphCallbackHandler.
+                # Fall back to direct list manipulation.
+                inheritable = getattr(manager, "inheritable_handlers", None)
+                if inheritable is not None and self._tracer not in inheritable:
+                    inheritable.append(self._tracer)
         return manager
 
 

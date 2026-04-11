@@ -1236,7 +1236,16 @@ class _SpanRecord:
     stash: Dict[str, Any] = field(default_factory=dict)
 
 
-class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
+# Dynamically select the best base class: use GraphCallbackHandler when
+# langgraph is installed so that the tracer is accepted by LangGraph's
+# _AsyncGraphCallbackManager.add_handler() (which type-checks handlers).
+try:
+    from langgraph.callbacks import GraphCallbackHandler as _TracerBase
+except ImportError:
+    _TracerBase = BaseCallbackHandler  # type: ignore[misc,assignment]
+
+
+class AzureAIOpenTelemetryTracer(_TracerBase):  # type: ignore[misc]
     """LangChain callback handler that emits OpenTelemetry GenAI spans."""
 
     _azure_monitor_configured: bool = False
