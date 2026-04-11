@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import os
 import threading
 from typing import TYPE_CHECKING, Any, Callable
@@ -69,12 +70,21 @@ _ENV_AUTO_CONFIGURE_AZURE_MONITOR = "OTEL_AUTO_CONFIGURE_AZURE_MONITOR"
 _BASE_CALLBACK_MANAGER_MODULE = "langchain_core.callbacks.base"
 _BASE_CALLBACK_MANAGER_INIT = "BaseCallbackManager.__init__"
 _BASE_CALLBACK_MANAGER_INIT_ATTR = "__init__"
+_LANGGRAPH_CALLBACK_MANAGER_TARGETS = (
+    ("langgraph._internal._config", "get_callback_manager_for_config"),
+    ("langgraph._internal._config", "get_async_callback_manager_for_config"),
+    ("langgraph._internal._runnable", "get_callback_manager_for_config"),
+    ("langgraph._internal._runnable", "get_async_callback_manager_for_config"),
+    ("langgraph.pregel.main", "get_callback_manager_for_config"),
+    ("langgraph.pregel.main", "get_async_callback_manager_for_config"),
+)
 _AUTO_TRACING_LOCK = threading.Lock()
 _active_tracer: AzureAIOpenTelemetryTracer | None = None
+_patched_langgraph_targets: list[tuple[str, str]] = []
 
 
-class _BaseCallbackManagerInitWrapper:
-    """Inject a tracer into inheritable handlers after callback manager init."""
+class _CallbackManagerInjector:
+    """Helper for injecting the tracer into callback managers."""
 
     def __init__(self, tracer: AzureAIOpenTelemetryTracer) -> None:
         self._tracer = tracer
@@ -90,6 +100,15 @@ class _BaseCallbackManagerInitWrapper:
             for handler in handlers
         )
 
+    def _inject_tracer(self, manager: Any) -> Any:
+        if not self._has_existing_tracer(manager):
+            manager.add_handler(self._tracer, True)
+        return manager
+
+
+class _BaseCallbackManagerInitWrapper(_CallbackManagerInjector):
+    """Inject a tracer into inheritable handlers after callback manager init."""
+
     def __call__(
         self,
         wrapped: Callable[..., Any],
@@ -98,9 +117,34 @@ class _BaseCallbackManagerInitWrapper:
         kwargs: dict[str, Any],
     ) -> Any:
         result = wrapped(*args, **kwargs)
-        if not self._has_existing_tracer(instance):
-            instance.add_handler(self._tracer, True)
+        self._inject_tracer(instance)
         return result
+
+
+class _CallbackManagerFactoryWrapper(_CallbackManagerInjector):
+    """Inject a tracer into callback managers returned by factory helpers."""
+
+    def __call__(
+        self,
+        wrapped: Callable[..., Any],
+        instance: Any,
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
+        del instance
+        manager = wrapped(*args, **kwargs)
+        self._inject_tracer(manager)
+        return manager
+
+
+def _load_optional_module(module_name: str) -> Any | None:
+    """Import an optional module, returning ``None`` when unavailable."""
+    try:
+        return importlib.import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if module_name == exc.name or module_name.startswith(f"{exc.name}."):
+            return None
+        raise
 
 
 def _env_bool(key: str, default: bool) -> bool:
@@ -167,6 +211,47 @@ def _load_callback_manager_class() -> type[Any]:
     return BaseCallbackManager
 
 
+def _patch_base_callback_manager(tracer: AzureAIOpenTelemetryTracer) -> None:
+    """Patch BaseCallbackManager.__init__ to auto-inject the Azure tracer."""
+    assert wrap_function_wrapper is not None
+    wrap_function_wrapper(
+        _BASE_CALLBACK_MANAGER_MODULE,
+        _BASE_CALLBACK_MANAGER_INIT,
+        _BaseCallbackManagerInitWrapper(tracer),
+    )
+
+
+def _unpatch_base_callback_manager() -> None:
+    """Unpatch BaseCallbackManager.__init__."""
+    unwrap(_load_callback_manager_class(), _BASE_CALLBACK_MANAGER_INIT_ATTR)
+
+
+def _patch_langgraph_callback_manager_helpers(
+    tracer: AzureAIOpenTelemetryTracer,
+) -> None:
+    """Patch LangGraph callback-manager helper functions when available."""
+    assert wrap_function_wrapper is not None
+    _patched_langgraph_targets.clear()
+    factory_wrapper = _CallbackManagerFactoryWrapper(tracer)
+
+    for module_name, function_name in _LANGGRAPH_CALLBACK_MANAGER_TARGETS:
+        module = _load_optional_module(module_name)
+        if module is None or not hasattr(module, function_name):
+            continue
+
+        wrap_function_wrapper(module_name, function_name, factory_wrapper)
+        _patched_langgraph_targets.append((module_name, function_name))
+
+
+def _unpatch_langgraph_callback_manager_helpers() -> None:
+    """Unpatch any LangGraph callback-manager helpers patched earlier."""
+    for module_name, function_name in _patched_langgraph_targets:
+        module = _load_optional_module(module_name)
+        if module is not None and hasattr(module, function_name):
+            unwrap(module, function_name)
+    _patched_langgraph_targets.clear()
+
+
 @experimental()
 def enable_auto_tracing(
     *,
@@ -186,9 +271,9 @@ def enable_auto_tracing(
 ) -> None:
     """Enable auto-injection of Azure tracer into callback managers.
 
-    When called, every new ``BaseCallbackManager`` instance created by
-    LangChain/LangGraph will automatically include an
-    ``AzureAIOpenTelemetryTracer`` in its inheritable handlers.
+    When called, every new ``BaseCallbackManager`` instance and every callback
+    manager created through LangGraph's helper factories will automatically
+    include an ``AzureAIOpenTelemetryTracer`` in its inheritable handlers.
 
     Each parameter falls back to an environment variable when not supplied:
 
@@ -299,11 +384,8 @@ def enable_auto_tracing(
 
             tracer = tracer_class(**tracer_kwargs)
 
-        wrap_function_wrapper(
-            _BASE_CALLBACK_MANAGER_MODULE,
-            _BASE_CALLBACK_MANAGER_INIT,
-            _BaseCallbackManagerInitWrapper(tracer),
-        )
+        _patch_base_callback_manager(tracer)
+        _patch_langgraph_callback_manager_helpers(tracer)
         _active_tracer = tracer
 
 
@@ -317,7 +399,8 @@ def disable_auto_tracing() -> None:
             return
 
         _ensure_otel_instrumentation_available()
-        unwrap(_load_callback_manager_class(), _BASE_CALLBACK_MANAGER_INIT_ATTR)
+        _unpatch_base_callback_manager()
+        _unpatch_langgraph_callback_manager_helpers()
         _active_tracer = None
 
 

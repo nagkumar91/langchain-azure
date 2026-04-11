@@ -256,6 +256,42 @@ def test_enable_auto_tracing_normalizes_azure_provider_name(
     assert tracer._default_provider_name == "azure.ai.openai"  # type: ignore[attr-defined]
 
 
+def test_callback_manager_factory_wrapper_injects_tracer() -> None:
+    tracer = tracing.AzureAIOpenTelemetryTracer(provider_name="test-provider")
+    wrapper = auto_instrument._CallbackManagerFactoryWrapper(tracer)
+    manager = BaseCallbackManager(handlers=[])
+
+    returned = wrapper(lambda *args, **kwargs: manager, None, (), {})
+
+    assert returned is manager
+    assert _get_inheritable_tracers(manager) == [tracer]
+
+
+def test_patch_langgraph_callback_manager_helpers_wraps_async_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracer = tracing.AzureAIOpenTelemetryTracer(provider_name="test-provider")
+    wrap_calls: list[tuple[str, str]] = []
+
+    def fake_wrap_function_wrapper(module: str, name: str, wrapper: object) -> None:
+        del wrapper
+        wrap_calls.append((module, name))
+
+    monkeypatch.setattr(
+        auto_instrument, "wrap_function_wrapper", fake_wrap_function_wrapper
+    )
+    auto_instrument._patched_langgraph_targets.clear()
+
+    auto_instrument._patch_langgraph_callback_manager_helpers(tracer)
+
+    assert {
+        ("langgraph._internal._config", "get_async_callback_manager_for_config"),
+        ("langgraph._internal._runnable", "get_async_callback_manager_for_config"),
+        ("langgraph.pregel.main", "get_async_callback_manager_for_config"),
+    }.issubset(set(wrap_calls))
+    auto_instrument._patched_langgraph_targets.clear()
+
+
 def test_env_bool_accepts_on_off_and_whitespace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -294,18 +330,19 @@ def test_enable_auto_tracing_serializes_concurrent_calls(
         def __init__(self, **kwargs: object) -> None:
             self.kwargs = kwargs
 
-    wrap_started = threading.Event()
-    allow_wrap_finish = threading.Event()
-    wrap_calls = 0
+    patch_started = threading.Event()
+    allow_patch_finish = threading.Event()
+    patch_calls = {"base": 0, "langgraph": 0}
 
-    def fake_wrap_function_wrapper(module: str, name: str, wrapper: object) -> None:
-        del wrapper
-        nonlocal wrap_calls
-        assert module == "langchain_core.callbacks.base"
-        assert name == "BaseCallbackManager.__init__"
-        wrap_started.set()
-        assert allow_wrap_finish.wait(timeout=2)
-        wrap_calls += 1
+    def fake_patch_base_callback_manager(tracer: object) -> None:
+        del tracer
+        patch_started.set()
+        assert allow_patch_finish.wait(timeout=2)
+        patch_calls["base"] += 1
+
+    def fake_patch_langgraph_callback_manager_helpers(tracer: object) -> None:
+        del tracer
+        patch_calls["langgraph"] += 1
 
     monkeypatch.setattr(auto_instrument, "_active_tracer", None)
     monkeypatch.setattr(
@@ -313,7 +350,14 @@ def test_enable_auto_tracing_serializes_concurrent_calls(
     )
     monkeypatch.setattr(auto_instrument, "_ensure_wrapt_available", lambda: None)
     monkeypatch.setattr(
-        auto_instrument, "wrap_function_wrapper", fake_wrap_function_wrapper
+        auto_instrument,
+        "_patch_base_callback_manager",
+        fake_patch_base_callback_manager,
+    )
+    monkeypatch.setattr(
+        auto_instrument,
+        "_patch_langgraph_callback_manager_helpers",
+        fake_patch_langgraph_callback_manager_helpers,
     )
     monkeypatch.setattr(auto_instrument, "_load_tracer_class", lambda: DummyTracer)
 
@@ -321,13 +365,13 @@ def test_enable_auto_tracing_serializes_concurrent_calls(
     second_thread = threading.Thread(target=auto_instrument.enable_auto_tracing)
 
     first_thread.start()
-    assert wrap_started.wait(timeout=2)
+    assert patch_started.wait(timeout=2)
     second_thread.start()
-    allow_wrap_finish.set()
+    allow_patch_finish.set()
     first_thread.join(timeout=2)
     second_thread.join(timeout=2)
 
-    assert wrap_calls == 1
+    assert patch_calls == {"base": 1, "langgraph": 1}
     assert auto_instrument.is_auto_tracing_enabled() is True
     monkeypatch.setattr(auto_instrument, "_active_tracer", None)
 
