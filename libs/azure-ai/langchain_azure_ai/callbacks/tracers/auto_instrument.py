@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 import threading
 from typing import TYPE_CHECKING, Any, Callable
 
 from langchain_azure_ai._api.base import experimental
+
+LOGGER = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from langchain_azure_ai.callbacks.tracers.inference_tracing import (
@@ -248,7 +251,15 @@ def _patch_langgraph_callback_manager_helpers(
     for module_name, function_name in _LANGGRAPH_CALLBACK_MANAGER_TARGETS:
         try:
             module = _load_optional_module(module_name)
+        except ModuleNotFoundError:
+            continue
         except ImportError:
+            LOGGER.warning(
+                "Skipping LangGraph patch target %s.%s due to import error",
+                module_name,
+                function_name,
+                exc_info=True,
+            )
             continue
         if module is None or not hasattr(module, function_name):
             continue
@@ -262,7 +273,15 @@ def _unpatch_langgraph_callback_manager_helpers() -> None:
     for module_name, function_name in _patched_langgraph_targets:
         try:
             module = _load_optional_module(module_name)
+        except ModuleNotFoundError:
+            continue
         except ImportError:
+            LOGGER.warning(
+                "Skipping LangGraph unpatch target %s.%s due to import error",
+                module_name,
+                function_name,
+                exc_info=True,
+            )
             continue
         if module is not None and hasattr(module, function_name):
             unwrap(module, function_name)

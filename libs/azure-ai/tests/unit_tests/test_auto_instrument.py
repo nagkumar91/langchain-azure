@@ -317,10 +317,27 @@ def test_patch_langgraph_callback_manager_helpers_wraps_async_targets(
     tracer = tracing.AzureAIOpenTelemetryTracer(provider_name="test-provider")
     wrap_calls: list[tuple[str, str]] = []
 
+    targets = (
+        ("langgraph.fake_config", "get_callback_manager_for_config"),
+        ("langgraph.fake_config", "get_async_callback_manager_for_config"),
+        ("langgraph.fake_runnable", "get_callback_manager_for_config"),
+        ("langgraph.fake_runnable", "get_async_callback_manager_for_config"),
+    )
+
+    def fake_load_optional_module(module_name: str) -> object:
+        return SimpleNamespace(
+            get_callback_manager_for_config=object(),
+            get_async_callback_manager_for_config=object(),
+        )
+
     def fake_wrap_function_wrapper(module: str, name: str, wrapper: object) -> None:
         del wrapper
         wrap_calls.append((module, name))
 
+    monkeypatch.setattr(auto_instrument, "_LANGGRAPH_CALLBACK_MANAGER_TARGETS", targets)
+    monkeypatch.setattr(
+        auto_instrument, "_load_optional_module", fake_load_optional_module
+    )
     monkeypatch.setattr(
         auto_instrument, "wrap_function_wrapper", fake_wrap_function_wrapper
     )
@@ -328,11 +345,8 @@ def test_patch_langgraph_callback_manager_helpers_wraps_async_targets(
 
     auto_instrument._patch_langgraph_callback_manager_helpers(tracer)
 
-    assert {
-        ("langgraph._internal._config", "get_async_callback_manager_for_config"),
-        ("langgraph._internal._runnable", "get_async_callback_manager_for_config"),
-        ("langgraph.pregel.main", "get_async_callback_manager_for_config"),
-    }.issubset(set(wrap_calls))
+    assert set(wrap_calls) == set(targets)
+    assert auto_instrument._patched_langgraph_targets == list(targets)
     auto_instrument._patched_langgraph_targets.clear()
 
 
