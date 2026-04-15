@@ -157,8 +157,6 @@ enable_auto_tracing(
 )
 ```
 
-> **Hosted agents:** If you are running inside a hosted Azure AI Foundry agent, keep `auto_configure_azure_monitor=False` (the default) because the host already configures the `TracerProvider`. Setting it to `True` would create a conflicting provider and cause duplicate or lost spans.
-
 For a complete end-to-end example, see [`samples/enable_auto_tracing_appinsights.py`](../../samples/enable_auto_tracing_appinsights.py).
 
 
