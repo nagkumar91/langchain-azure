@@ -150,7 +150,7 @@ from langchain_azure_ai.callbacks.tracers import enable_auto_tracing
 
 enable_auto_tracing(
     connection_string="<your-application-insights-connection-string>",
-    auto_configure_azure_monitor=True,   # set to False in hosted Azure AI Foundry agents
+    auto_configure_azure_monitor=True,
     enable_content_recording=False,      # set to True to capture message payloads
     provider_name="azure.ai.openai",
     trace_all_langgraph_nodes=True,
