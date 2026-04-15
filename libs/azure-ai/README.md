@@ -20,23 +20,6 @@ For using tracing capabilities with OpenTelemetry, you need to add the extras `o
 pip install -U langchain-azure-ai[opentelemetry]
 ```
 
-## Auto tracing to Azure Application Insights
-
-For a minimal end-to-end example that auto-injects the Azure tracer into
-LangGraph callback managers and exports spans to Application Insights, see
-[`samples/enable_auto_tracing_appinsights.py`](../../samples/enable_auto_tracing_appinsights.py).
-
-The sample shows how to:
-
-* set `APPLICATION_INSIGHTS_CONNECTION_STRING`
-* configure an Azure OpenAI chat model for a LangGraph app
-* call `enable_auto_tracing(..., auto_configure_azure_monitor=True)` for a
-  local script or notebook
-
-If you are running inside a hosted Azure AI Foundry agent, keep
-`auto_configure_azure_monitor=False` because the host already configures the
-`TracerProvider`.
-
 If you are transitioning from Microsoft Foundry classic and you need access to deprecated classes, use `[v1]` extra.
 
 ```bash
@@ -150,6 +133,31 @@ Name: my-echo-agent
 
 You're not a genius and you don't love programming!
 ```
+
+
+### Auto tracing to Azure Application Insights
+
+To trace your LangChain / LangGraph applications with Azure Application Insights, first install the OpenTelemetry extras:
+
+```bash
+pip install -U langchain-azure-ai[opentelemetry]
+```
+
+Then enable auto tracing in your application. Every `BaseCallbackManager` and LangGraph callback manager created after this call will automatically include the Azure tracer:
+
+```python
+from langchain_azure_ai.callbacks.tracers import enable_auto_tracing
+
+enable_auto_tracing(
+    connection_string="<your-application-insights-connection-string>",
+    auto_configure_azure_monitor=True,
+    enable_content_recording=False,      # set to True to capture message payloads
+    provider_name="azure.ai.openai",
+    trace_all_langgraph_nodes=True,
+)
+```
+
+For a complete end-to-end example, see [`samples/enable_auto_tracing_appinsights.py`](../../samples/enable_auto_tracing_appinsights.py).
 
 
 ## Changelog
