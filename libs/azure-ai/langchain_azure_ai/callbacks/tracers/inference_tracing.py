@@ -1058,7 +1058,7 @@ def _normalize_provider_name_value(value: Optional[str]) -> Optional[str]:
         "gcp_gen_ai": "gcp.gen_ai",
         "ibm_watsonx_ai": "ibm.watsonx.ai",
     }
-    return aliases.get(v, value)
+    return aliases.get(v, v)
 
 
 def _infer_provider_name(
@@ -2798,6 +2798,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             (serialized.get("kwargs", {}) or {}).get("model_name"),
             (serialized.get("kwargs", {}) or {}).get("azure_deployment"),
             (serialized.get("kwargs", {}) or {}).get("deployment_name"),
+            (serialized.get("kwargs", {}) or {}).get("deployment"),
             metadata.get("ls_model_name"),
             metadata.get("model_name"),
             metadata.get("model"),
