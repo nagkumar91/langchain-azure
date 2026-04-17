@@ -1196,11 +1196,6 @@ def _infer_server_port(
         parsed = urlparse(base_url)
         if parsed.port:
             return parsed.port
-        scheme = (parsed.scheme or "").lower()
-        if scheme == "https":
-            return 443
-        if scheme == "http":
-            return 80
     except Exception:  # pragma: no cover
         return None
     return None
@@ -2326,9 +2321,7 @@ class AzureAIOpenTelemetryTracer(BaseCallbackHandler):
             # don't expose it in serialized/invocation_params), fall back to the
             # response model so the openai-based inference spec requirement is met.
             if not record.attributes.get(Attrs.REQUEST_MODEL):
-                record.span.set_attribute(
-                    Attrs.REQUEST_MODEL, llm_output["model_name"]
-                )
+                record.span.set_attribute(Attrs.REQUEST_MODEL, llm_output["model_name"])
                 record.attributes[Attrs.REQUEST_MODEL] = llm_output["model_name"]
             record.stash.pop("_metric_attrs_cache", None)
         if llm_output.get("system_fingerprint"):
