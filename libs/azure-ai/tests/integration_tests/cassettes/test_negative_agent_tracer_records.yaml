@@ -64,8 +64,6 @@ interactions:
       - REDACTED
       Server:
       - REDACTED
-      Set-Cookie:
-      - REDACTED
       Strict-Transport-Security:
       - REDACTED
       Transfer-Encoding:
